@@ -1,0 +1,17 @@
+[Unit]
+Description=CheapSecurity CCTV
+After=network.target
+
+[Service]
+Type=simple
+User=%I
+WorkingDirectory=/home/%I/CheapSecurity
+Environment="CHEAPSECURITY_CONFIG=/home/%I/CheapSecurity/config.json"
+ExecStart=/home/%I/CheapSecurity/venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:5000 wsgi:application
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

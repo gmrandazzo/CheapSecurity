@@ -1,0 +1,56 @@
+{
+  "camera": {
+    "device": 0,
+    "width": 2560,
+    "height": 1440,
+    "fps": 15
+  },
+  "motion": {
+    "threshold": 25,
+    "min_area": 2000,
+    "blur_size": 21,
+    "cooldown_seconds": 5,
+    "scale": 0.25
+  },
+  "recording": {
+    "dir": "./recordings",
+    "max_duration_seconds": 60,
+    "pre_buffer_seconds": 3,
+    "codec": "MJPG",
+    "extension": ".avi"
+  },
+  "notifications": {
+    "enabled": true,
+    "smtp": {
+      "server": "smtp.gmail.com",
+      "port": 465,
+      "username": "youremail@gmail.com",
+      "password": "gmail_token",
+      "use_tls": true
+    },
+    "from": "youremail@gmail.com",
+    "to": [
+      "email1@something.com",
+      "email2@something.com"
+    ],
+    "subject": "CheapSecurity Motion Alert",
+    "min_interval_minutes": 5
+  },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "stream_scale": 0.5,
+    "auth": {
+      "enabled": false,
+      "username": "admin",
+      "password": "changeme"
+    }
+  },
+  "storage": {
+    "max_age_days": 3,
+    "max_size_gb": 10,
+    "cleanup_interval_minutes": 60,
+    "emergency_free_space_gb": 1.0,
+    "emergency_delete_count": 4
+  }
+}
