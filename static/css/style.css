@@ -1,0 +1,126 @@
+:root {
+  --bg: #121212;
+  --card: #1e1e1e;
+  --text: #e0e0e0;
+  --muted: #9e9e9e;
+  --accent: #4caf50;
+  --danger: #f44336;
+  --warn: #ff9800;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: var(--card);
+  border-bottom: 1px solid #333;
+}
+
+header h1 { margin: 0; font-size: 1.25rem; }
+
+.badge {
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--muted);
+  color: #000;
+}
+
+.badge.recording { background: var(--danger); color: #fff; }
+.badge.motion { background: var(--warn); color: #000; }
+.badge.ok { background: var(--accent); color: #000; }
+
+main { padding: 1rem; max-width: 900px; margin: 0 auto; }
+
+.card {
+  background: var(--card);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+.card h2 { margin-top: 0; font-size: 1.1rem; }
+
+#live {
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: #000;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 0.5rem 1rem;
+  margin: 0;
+}
+
+dt { color: var(--muted); }
+dd { margin: 0; font-weight: 500; }
+
+button {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover { opacity: 0.9; }
+
+#recordings {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0 0;
+}
+
+#recordings li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem;
+  border-bottom: 1px solid #333;
+}
+
+#recordings li:last-child { border-bottom: none; }
+
+#recordings a {
+  color: var(--accent);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+#recordings a:hover { text-decoration: underline; }
+
+.meta { color: var(--muted); font-size: 0.85rem; }
+
+.empty { color: var(--muted); font-style: italic; }
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+  cursor: pointer;
+}
+
+.toggle input {
+  width: 1.25rem;
+  height: 1.25rem;
+  accent-color: var(--accent);
+}
