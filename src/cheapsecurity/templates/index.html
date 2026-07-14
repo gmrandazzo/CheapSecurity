@@ -1,0 +1,87 @@
+<!--
+  CheapSecurity - lightweight CCTV system for the Odroid XU4
+  Copyright (C) 2026  Marco
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published
+  by the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CheapSecurity CCTV</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>🎥 CheapSecurity CCTV</h1>
+    <span id="status-badge" class="badge">Initializing…</span>
+  </header>
+
+  <main>
+    <section class="card stream">
+      <h2>Live stream</h2>
+      <img id="live" src="{{ url_for('video_feed') }}" alt="Live camera feed">
+    </section>
+
+    <section class="card">
+      <h2>Status</h2>
+      <dl id="status-list">
+        <dt>Resolution</dt><dd id="status-res">—</dd>
+        <dt>FPS</dt><dd id="status-fps">—</dd>
+        <dt>Recording</dt><dd id="status-rec">—</dd>
+        <dt>Motion</dt><dd id="status-motion">—</dd>
+        <dt>Current file</dt><dd id="status-file">—</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <label class="toggle">
+        <input type="checkbox" id="night-toggle" onchange="setNightMode(this.checked)">
+        <span>🌙 Night mode (low-light enhancement)</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="telegram-toggle" onchange="setTelegram(this.checked)">
+        <span>Telegram video notifications</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="notif-toggle" onchange="setNotifications(this.checked)">
+        <span>Email notifications on motion</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="auth-toggle" onchange="setAuth(this.checked)">
+        <span>Built-in basic auth (disable if using nginx auth)</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>Recordings</h2>
+      <div class="toolbar">
+        <button id="refresh-btn" onclick="loadRecordings()">Refresh</button>
+        <label class="toggle inline">
+          <input type="checkbox" id="select-all" onchange="toggleSelectAll(this.checked)">
+          <span>Select all</span>
+        </label>
+        <button id="telegram-btn" onclick="sendSelectedToTelegram()" disabled>Send to Telegram</button>
+        <button id="download-btn" onclick="downloadSelected()" disabled>Download selected</button>
+        <button id="delete-btn" class="danger" onclick="deleteSelected()" disabled>Delete selected</button>
+      </div>
+      <ul id="recordings"></ul>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

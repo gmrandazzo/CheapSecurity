@@ -1,5 +1,8 @@
+# Runtime dependencies are defined in pyproject.toml.
+# Install the project in editable mode with:
+#   pip install -e .
 flask>=2.0.0
 werkzeug>=2.0.0
 gunicorn>=21.0.0
-# OpenCV must be installed manually on this ARM board.
-# Verify with: python3 -c "import cv2; print(cv2.__version__)"
+requests>=2.25.0
+# OpenCV must be installed manually on the target ARM board.

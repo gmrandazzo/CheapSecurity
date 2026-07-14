@@ -7,7 +7,12 @@ Type=simple
 User=%I
 WorkingDirectory=/home/%I/CheapSecurity
 Environment="CHEAPSECURITY_CONFIG=/home/%I/CheapSecurity/config.json"
-ExecStart=/home/%I/CheapSecurity/venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:5000 wsgi:application
+# Bind on 0.0.0.0 so the dashboard/stream are reachable directly on the network.
+# For production behind nginx, change -b to 127.0.0.1:5000.
+# The package must be installed in editable mode first:
+#   source /home/%I/CheapSecurity/venv/bin/activate
+#   pip install -e /home/%I/CheapSecurity
+ExecStart=/home/%I/CheapSecurity/venv/bin/gunicorn -w 1 --threads 4 -b 0.0.0.0:5000 cheapsecurity.wsgi:application
 Restart=always
 RestartSec=5
 StandardOutput=journal

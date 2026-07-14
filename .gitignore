@@ -1,0 +1,26 @@
+venv/
+recordings/
+__pycache__/
+*.pyc
+*.swp
+*.swo
+.DS_Store
+
+# Python packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Test / coverage / type-check artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# User-specific configuration and credentials
+config.json
+*.back
+*_token
+gmail_smtp_token
+telegram_bot_token
