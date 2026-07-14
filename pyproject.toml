@@ -1,0 +1,117 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cheapsecurity"
+version = "0.1.0"
+description = "Lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB webcam"
+readme = "README.md"
+license = {text = "GNU Affero General Public License v3 or later"}
+authors = [
+    {name = "Marco"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=2.0.0",
+    "werkzeug>=2.0.0",
+    "gunicorn>=21.0.0",
+    "requests>=2.25.0",
+    # OpenCV must be installed manually on the target ARM board.
+    # Verify with: python3 -c "import cv2; print(cv2.__version__)"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+]
+dev = [
+    "cheapsecurity[test]",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "pre-commit>=3.5.0",
+    "types-requests>=2.25.0",
+]
+
+[project.scripts]
+cheapsecurity = "cheapsecurity.app:main"
+cheapsecurity-diagnose = "cheapsecurity.diagnose:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cheapsecurity = [
+    "templates/*",
+    "static/**/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = [
+    "--strict-markers",
+    "--cov=cheapsecurity",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-fail-under=50",
+]
+
+[tool.coverage.run]
+source = ["src/cheapsecurity"]
+omit = [
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
+exclude = [
+    "venv",
+    "build",
+    "dist",
+]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false

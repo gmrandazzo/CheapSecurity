@@ -1,3 +1,21 @@
+/*
+ * CheapSecurity - lightweight CCTV system for the Odroid XU4
+ * Copyright (C) 2026  Marco
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 :root {
   --bg: #121212;
   --card: #1e1e1e;
@@ -92,12 +110,23 @@ button:hover { opacity: 0.9; }
 #recordings li {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 0.75rem;
   padding: 0.75rem;
   border-bottom: 1px solid #333;
 }
 
 #recordings li:last-child { border-bottom: none; }
+
+#recordings .rec-checkbox {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+#recordings .rec-info {
+  flex: 1;
+  min-width: 0;
+}
 
 #recordings a {
   color: var(--accent);
@@ -111,6 +140,14 @@ button:hover { opacity: 0.9; }
 
 .empty { color: var(--muted); font-style: italic; }
 
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -119,8 +156,22 @@ button:hover { opacity: 0.9; }
   cursor: pointer;
 }
 
+.toggle.inline {
+  margin: 0;
+}
+
 .toggle input {
   width: 1.25rem;
   height: 1.25rem;
   accent-color: var(--accent);
+}
+
+button.danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
