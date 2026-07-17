@@ -141,6 +141,8 @@ class CCTVSystem:
 
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._cap_lock = threading.Lock()
+        self._config_lock = threading.Lock()
         self._current_frame: bytes | None = None
         self._jpeg_quality = 75
         self._buffer_jpeg_quality = 85  # lower memory use for pre-motion buffer
@@ -209,8 +211,16 @@ class CCTVSystem:
         logger.info(f"Web auth {'enabled' if enabled else 'disabled'}")
 
     def _save_config(self) -> None:
-        with open(self.config_path, "w") as f:
-            json.dump(self.cfg, f, indent=2)
+        with self._config_lock:
+            temp_path = Path(self.config_path).with_suffix(".tmp")
+            try:
+                with open(temp_path, "w") as f:
+                    json.dump(self.cfg, f, indent=2)
+                temp_path.replace(self.config_path)
+            except Exception as e:
+                logger.error(f"Failed to save config: {e}")
+                if temp_path.exists():
+                    temp_path.unlink()
 
     def list_recordings(self) -> list:
         """Return metadata for all recorded videos, newest first."""
@@ -244,7 +254,10 @@ class CCTVSystem:
         while self.running:
             loop_start = time.time()
 
-            ok, frame = self.cap.read()
+            with self._cap_lock:
+                if self.cap is None:
+                    break
+                ok, frame = self.cap.read()
             if not ok or frame is None:
                 logger.warning("Frame capture failed, retrying...")
                 time.sleep(0.1)
@@ -329,77 +342,80 @@ class CCTVSystem:
     # Camera
     # ------------------------------------------------------------------
     def _open_capture(self) -> bool:
-        logger.info(f"Opening camera /dev/video{self.device}")
-        self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
-        if not self.cap.isOpened():
-            # Fallback to default backend
-            self.cap = cv2.VideoCapture(self.device)
-        if not self.cap.isOpened():
-            logger.error(f"Failed to open camera device {self.device}")
-            return False
+        with self._cap_lock:
+            logger.info(f"Opening camera /dev/video{self.device}")
+            self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+            if not self.cap.isOpened():
+                # Fallback to default backend
+                self.cap = cv2.VideoCapture(self.device)
+            if not self.cap.isOpened():
+                logger.error(f"Failed to open camera device {self.device}")
+                return False
 
-        # Request MJPG pixel format so high resolutions (e.g. 2K) are available
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+            # Request MJPG pixel format so high resolutions (e.g. 2K) are available
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if actual_fps > 0:
-            self.actual_fps = actual_fps
-        else:
-            self.actual_fps = self.fps
-        logger.info(
-            f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
-        )
+            actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if actual_fps > 0:
+                self.actual_fps = actual_fps
+            else:
+                self.actual_fps = self.fps
+            logger.info(
+                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+            )
 
-        # Capture current camera defaults before any night-mode changes
-        self._normal_brightness = self.cap.get(cv2.CAP_PROP_BRIGHTNESS)
-        self._normal_contrast = self.cap.get(cv2.CAP_PROP_CONTRAST)
-        logger.info(
-            f"Camera defaults — Brightness: {self._normal_brightness}, Contrast: {self._normal_contrast}"
-        )
+            # Capture current camera defaults before any night-mode changes
+            self._normal_brightness = self.cap.get(cv2.CAP_PROP_BRIGHTNESS)
+            self._normal_contrast = self.cap.get(cv2.CAP_PROP_CONTRAST)
+            logger.info(
+                f"Camera defaults — Brightness: {self._normal_brightness}, Contrast: {self._normal_contrast}"
+            )
 
         self._apply_camera_night_mode()
         return True
 
     def _release_capture(self) -> None:
-        if self.cap:
-            self.cap.release()
-            self.cap = None
+        with self._cap_lock:
+            if self.cap:
+                self.cap.release()
+                self.cap = None
 
     def _apply_camera_night_mode(self) -> None:
         """Try to tune V4L2 camera properties for low light."""
-        if not self.cap or not self.cap.isOpened():
-            return
+        with self._cap_lock:
+            if not self.cap or not self.cap.isOpened():
+                return
 
-        if self.night_mode:
-            logger.info("Applying night mode camera settings...")
-            self.cap.set(cv2.CAP_PROP_FPS, self.night_mode_fps)
-            self.cap.set(cv2.CAP_PROP_GAIN, self.night_mode_gain)
-            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, self.night_mode_brightness)
-            self.cap.set(cv2.CAP_PROP_CONTRAST, self.night_mode_contrast)
-        else:
-            logger.info("Restoring normal camera settings...")
-            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-            self.cap.set(cv2.CAP_PROP_GAIN, 0)
-            if self._normal_brightness is not None:
-                self.cap.set(cv2.CAP_PROP_BRIGHTNESS, self._normal_brightness)
-            if self._normal_contrast is not None:
-                self.cap.set(cv2.CAP_PROP_CONTRAST, self._normal_contrast)
+            if self.night_mode:
+                logger.info("Applying night mode camera settings...")
+                self.cap.set(cv2.CAP_PROP_FPS, self.night_mode_fps)
+                self.cap.set(cv2.CAP_PROP_GAIN, self.night_mode_gain)
+                self.cap.set(cv2.CAP_PROP_BRIGHTNESS, self.night_mode_brightness)
+                self.cap.set(cv2.CAP_PROP_CONTRAST, self.night_mode_contrast)
+            else:
+                logger.info("Restoring normal camera settings...")
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                self.cap.set(cv2.CAP_PROP_GAIN, 0)
+                if self._normal_brightness is not None:
+                    self.cap.set(cv2.CAP_PROP_BRIGHTNESS, self._normal_brightness)
+                if self._normal_contrast is not None:
+                    self.cap.set(cv2.CAP_PROP_CONTRAST, self._normal_contrast)
 
-        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        actual_gain = self.cap.get(cv2.CAP_PROP_GAIN)
-        actual_brightness = self.cap.get(cv2.CAP_PROP_BRIGHTNESS)
-        actual_contrast = self.cap.get(cv2.CAP_PROP_CONTRAST)
-        if actual_fps > 0:
-            self.actual_fps = actual_fps
-        logger.info(
-            f"Camera settings — FPS: {self.actual_fps:.1f}, "
-            f"Gain: {actual_gain}, Brightness: {actual_brightness}, Contrast: {actual_contrast}"
-        )
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            actual_gain = self.cap.get(cv2.CAP_PROP_GAIN)
+            actual_brightness = self.cap.get(cv2.CAP_PROP_BRIGHTNESS)
+            actual_contrast = self.cap.get(cv2.CAP_PROP_CONTRAST)
+            if actual_fps > 0:
+                self.actual_fps = actual_fps
+            logger.info(
+                f"Camera settings — FPS: {self.actual_fps:.1f}, "
+                f"Gain: {actual_gain}, Brightness: {actual_brightness}, Contrast: {actual_contrast}"
+            )
 
     # ------------------------------------------------------------------
     # Motion detection
@@ -745,6 +761,9 @@ class CCTVSystem:
     def _telegram_poll_loop(self) -> None:
         logger.info("Starting Telegram command polling...")
         while self.running and self.telegram_poll_commands:
+            if not self.telegram_enabled:
+                time.sleep(5)
+                continue
             try:
                 url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
                 params = {"offset": self._telegram_offset + 1, "limit": 10}
@@ -862,7 +881,7 @@ class CCTVSystem:
             f"Deleting up to {self.emergency_delete_count} oldest recordings."
         )
         files = sorted(
-            (p for p in self.record_dir.iterdir() if p.is_file()),
+            (p for p in self.record_dir.glob(f"*{self.video_ext}") if p.is_file()),
             key=lambda p: p.stat().st_mtime,
         )
         deleted = 0
@@ -881,7 +900,7 @@ class CCTVSystem:
         logger.info("Running storage cleanup...")
         now = datetime.now()
         files = sorted(
-            (p for p in self.record_dir.iterdir() if p.is_file()),
+            (p for p in self.record_dir.glob(f"*{self.video_ext}") if p.is_file()),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )

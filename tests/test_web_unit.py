@@ -89,3 +89,50 @@ class TestAuth:
         credentials = base64.b64encode(b"admin:wrong").decode("ascii")
         response = test_client.get("/api/status", headers={"Authorization": f"Basic {credentials}"})
         assert response.status_code == 401
+
+
+class TestDownload:
+    def test_download_recordings_missing_filenames(self, client):
+        test_client, _ = client
+        response = test_client.post("/api/recordings/download", json={})
+        assert response.status_code == 400
+
+    def test_download_recordings_success(self, client, tmp_path):
+        test_client, fake_cctv = client
+        rec_dir = tmp_path / "recordings"
+        rec_dir.mkdir()
+        fake_cctv.record_dir = rec_dir
+
+        file1 = rec_dir / "motion_1.avi"
+        file1.write_bytes(b"dummy video data")
+
+        response = test_client.post(
+            "/api/recordings/download",
+            json={"filenames": ["motion_1.avi"]}
+        )
+        assert response.status_code == 200
+        assert response.headers["Content-Type"] == "application/zip"
+
+
+class TestTelegramSend:
+    def test_telegram_send_missing_filenames(self, client):
+        test_client, _ = client
+        response = test_client.post("/api/recordings/telegram", json={})
+        assert response.status_code == 400
+
+    def test_telegram_send_success(self, client, tmp_path):
+        test_client, fake_cctv = client
+        rec_dir = tmp_path / "recordings"
+        rec_dir.mkdir()
+        fake_cctv.record_dir = rec_dir
+
+        file1 = rec_dir / "motion_1.avi"
+        file1.write_bytes(b"dummy video data")
+
+        response = test_client.post(
+            "/api/recordings/telegram",
+            json={"filenames": ["motion_1.avi"]}
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["results"][0]["sent"] is True

@@ -25,6 +25,8 @@ and direct playback/download links.
 import base64
 import io
 import os
+import tempfile
+import threading
 import time
 import zipfile
 from collections.abc import Iterator
@@ -35,6 +37,7 @@ import cv2
 from flask import (
     Flask,
     Response,
+    after_this_request,
     jsonify,
     make_response,
     render_template,
@@ -156,20 +159,38 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    memory_file = io.BytesIO()
-    with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name in filenames:
-            path = cctv.record_dir / name
-            try:
-                if path.resolve().parent != cctv.record_dir.resolve() or not path.is_file():
-                    continue
-                zf.write(path, arcname=path.name)
-            except Exception:
-                continue
+    # Create temporary file on disk to avoid RAM exhaustion OOM crashes
+    temp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    temp_zip_path = temp_zip.name
+    temp_zip.close()
 
-    memory_file.seek(0)
+    @after_this_request
+    def remove_file(response: Response) -> Response:
+        try:
+            os.unlink(temp_zip_path)
+        except Exception:
+            pass
+        return response
+
+    try:
+        with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in filenames:
+                path = cctv.record_dir / name
+                try:
+                    if path.resolve().parent != cctv.record_dir.resolve() or not path.is_file():
+                        continue
+                    zf.write(path, arcname=path.name)
+                except Exception:
+                    continue
+    except Exception as e:
+        try:
+            os.unlink(temp_zip_path)
+        except Exception:
+            pass
+        return jsonify({"error": f"Failed to generate zip: {e}"}), 500
+
     return send_file(
-        memory_file,
+        temp_zip_path,
         mimetype="application/zip",
         as_attachment=True,
         download_name="cheapsecurity_recordings.zip",
@@ -192,7 +213,12 @@ def api_send_telegram_recordings() -> RouteReturn:
             if path.resolve().parent != cctv.record_dir.resolve() or not path.is_file():
                 results.append({"filename": name, "sent": False, "error": "Invalid file"})
                 continue
-            cctv._send_telegram_video(path)
+            # Async upload in background thread to avoid blocking the single-worker Gunicorn server
+            threading.Thread(
+                target=cctv._send_telegram_video,
+                args=(path,),
+                daemon=True,
+            ).start()
             results.append({"filename": name, "sent": True})
         except Exception as e:
             results.append({"filename": name, "sent": False, "error": str(e)})

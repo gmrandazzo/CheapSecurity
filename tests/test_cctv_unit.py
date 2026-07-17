@@ -90,6 +90,17 @@ class TestStorageCleanup:
         system._cleanup_storage()
         assert not old_file.exists()
 
+    def test_cleanup_ignores_other_file_types(self, system, temp_recordings):
+        other_file = temp_recordings / "important_document.txt"
+        other_file.write_bytes(b"do not delete")
+        old_time = time.time() - 86400 * 365
+        other_file.touch()
+        import os
+
+        os.utime(other_file, (old_time, old_time))
+        system._cleanup_storage()
+        assert other_file.exists()
+
     def test_human_size(self, system):
         assert system._human_size(0) == "0.0 B"
         assert system._human_size(1024) == "1.0 KB"
