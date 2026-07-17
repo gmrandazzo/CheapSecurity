@@ -1,6 +1,22 @@
 # CheapSecurity
 
+<<<<<<< HEAD
 A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB webcam.
+=======
+This project provides a lightweight, self-hosted CCTV solution designed for Linux-based single-board computers (SBCs) and standard USB webcams. It offers an affordable, privacy-focused alternative for home monitoring by keeping your video data entirely under your control.
+Project Philosophy
+
+- Privacy-First: By storing all footage locally, this system eliminates the need for third-party cloud subscriptions and ensures your data never leaves your network.
+- Cost-Effective: Leverage existing hardware—such as a spare Linux board and a USB webcam—to build a fully functional surveillance system without recurring fees.
+- Minimalist Architecture: The software is optimized to run efficiently on low-power devices, ensuring high performance even on entry-level hardware.
+
+Key Features
+
+- Hardware Agnostic: Highly compatible with a wide range of standard USB webcams.
+- Resource Efficient: Optimized specifically for Linux-based boards (e.g., Raspberry Pi, Orange Pi, or similar SBCs).
+- Data Sovereignty: Full control over your storage path, retention policies, and access methods.
+- Simple Deployment: Designed for quick setup and easy maintenance.
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 
 ## Features
 
@@ -14,13 +30,22 @@ A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB web
 - **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
 - **Storage cleanup** by age, total size, and emergency low-disk cleanup
+<<<<<<< HEAD
 - **systemd autostart** ready
+=======
+- **systemd autostart** and **nginx** reverse-proxy ready
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 - Licensed under **GNU AGPLv3**
 
 ## Requirements
 
+<<<<<<< HEAD
 - Python 3.10 or newer
 - OpenCV with V4L2 support (see installation options below)
+=======
+- Python 3
+- OpenCV with V4L2 support (must be installed manually on the target ARM board)
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 - A USB webcam (`/dev/video0` by default)
 - Optional: a Telegram bot token for Telegram notifications
 - Optional: SMTP credentials for email alerts
@@ -33,6 +58,7 @@ A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB web
    python3 -c "import cv2; print(cv2.__version__)"
    ```
 
+<<<<<<< HEAD
    If OpenCV is not installed, you have two options:
 
    - **Option A — use a system OpenCV package** (recommended on ARM boards such as the Odroid XU4, where a pre-built system package is usually optimized for the board).
@@ -43,6 +69,9 @@ A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB web
    ### Option A: system OpenCV (recommended for ARM)
 
    This creates a venv that can see the system site-packages, so the system `cv2` is available inside the venv.
+=======
+2. Create and activate the virtual environment:
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 
    ```bash
    cd /home/marco/CheapSecurity
@@ -51,6 +80,7 @@ A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB web
    pip install -e .
    ```
 
+<<<<<<< HEAD
    ### Option B: install everything via pip
 
    Use this if you do not have a system OpenCV or prefer a self-contained venv.
@@ -65,6 +95,8 @@ A lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB web
 
    > **Note:** On some older ARM boards the pip `opencv-python-headless` wheel may not be available or may be slow. If that happens, install OpenCV from your distribution’s package manager instead and use Option A.
 
+=======
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 3. Find your webcam device (usually `/dev/video0`):
 
    ```bash
@@ -270,7 +302,11 @@ Toggle it from the dashboard. It is applied to the live stream, recordings, and 
 
 ## Production deployment
 
+<<<<<<< HEAD
 Do **not** expose Flask's development server to the internet. Use **Gunicorn** behind the built-in auth or another reverse proxy you trust.
+=======
+Do **not** expose Flask's development server to the internet. Use **Gunicorn** + **nginx**.
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 
 ### 1. Install Gunicorn
 
@@ -294,7 +330,11 @@ sudo systemctl enable --now cheapsecurity@marco.service
 
 This binds Gunicorn to `0.0.0.0:5000` with **one worker and four threads**, so the dashboard and stream are reachable directly on your network. Only one worker is used because the camera must be opened by a single process.
 
+<<<<<<< HEAD
 > **Security:** if you expose this to the internet, put a reverse proxy with HTTPS and authentication in front of Gunicorn. If you only access it locally, keep the built-in auth enabled.
+=======
+> **Security:** if you expose this to the internet, put nginx in front with HTTPS and authentication. If you only access it locally, keep the built-in auth enabled or use nginx basic auth.
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 
 View logs:
 
@@ -302,6 +342,50 @@ View logs:
 sudo journalctl -u cheapsecurity@marco.service -f
 ```
 
+<<<<<<< HEAD
+=======
+### 3. Put nginx in front
+
+Install nginx and use the provided example:
+
+```bash
+sudo apt install nginx
+sudo cp nginx.example.conf /etc/nginx/sites-available/cheapsecurity
+sudo nano /etc/nginx/sites-available/cheapsecurity   # edit server_name and paths
+sudo ln -s /etc/nginx/sites-available/cheapsecurity /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Key nginx settings for the MJPEG stream:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:5000;
+    proxy_buffering off;
+    proxy_cache off;
+}
+```
+
+### 4. HTTPS with Let's Encrypt
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d cctv.example.com
+```
+
+### 5. Authentication in nginx
+
+Disable the built-in Flask auth (`web.auth.enabled: false`) and let nginx handle it:
+
+```bash
+sudo apt install apache2-utils
+sudo htpasswd -c /etc/nginx/.htpasswd admin
+```
+
+Then uncomment the `auth_basic` lines in the nginx config and reload.
+
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 ## Project structure
 
 ```
@@ -320,6 +404,10 @@ CheapSecurity/
 ├── config.json.example    # Example settings template (committed)
 ├── pyproject.toml         # Package metadata and dependencies
 ├── cheapsecurity.service  # systemd template
+<<<<<<< HEAD
+=======
+├── nginx.example.conf     # Example nginx reverse proxy config
+>>>>>>> 416f649deb8b9ba792bff2f4a5d0518f63ba61b5
 ├── LICENSE                # GNU AGPLv3
 └── recordings/            # Saved videos
 ```
