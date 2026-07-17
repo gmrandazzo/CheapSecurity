@@ -1,5 +1,4 @@
 # CheapSecurity
-=======
 This project provides a lightweight, self-hosted CCTV solution designed for Linux-based single-board computers (SBCs) and standard USB webcams. It offers an affordable, privacy-focused alternative for home monitoring by keeping your video data entirely under your control.
 Project Philosophy
 
