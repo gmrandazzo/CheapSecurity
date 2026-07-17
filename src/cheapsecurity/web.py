@@ -23,7 +23,7 @@ and direct playback/download links.
 """
 
 import base64
-import io
+import contextlib
 import os
 import tempfile
 import threading
@@ -88,6 +88,20 @@ def _check_auth() -> Response | None:
 @app.before_request
 def require_auth() -> Response | None:
     return _check_auth()
+
+
+_CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+@app.before_request
+def require_csrf() -> Response | None:
+    if request.method in _CSRF_SAFE_METHODS:
+        return None
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return None
+    resp = make_response(jsonify({"error": "CSRF protection: missing X-Requested-With header"}))
+    resp.status_code = 403
+    return resp
 
 
 @app.route("/")
@@ -159,17 +173,16 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    # Create temporary file on disk to avoid RAM exhaustion OOM crashes
-    temp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    # Create temporary file on disk to avoid RAM exhaustion OOM crashes.
+    # Place it in the recordings directory so large selections do not fill /tmp.
+    temp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir))
     temp_zip_path = temp_zip.name
     temp_zip.close()
 
     @after_this_request
     def remove_file(response: Response) -> Response:
-        try:
+        with contextlib.suppress(Exception):
             os.unlink(temp_zip_path)
-        except Exception:
-            pass
         return response
 
     try:
@@ -183,10 +196,8 @@ def api_download_recordings() -> RouteReturn:
                 except Exception:
                     continue
     except Exception as e:
-        try:
+        with contextlib.suppress(Exception):
             os.unlink(temp_zip_path)
-        except Exception:
-            pass
         return jsonify({"error": f"Failed to generate zip: {e}"}), 500
 
     return send_file(
@@ -300,6 +311,10 @@ def video_feed() -> RouteReturn:
             frame = cctv.get_frame()
             if frame:
                 yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+                # Pace the MJPEG stream to the camera's actual rate instead of
+                # spinning as fast as the network allows on the same frame.
+                fps = max(1.0, cctv.actual_fps) if cctv else 1.0
+                time.sleep(1.0 / fps)
             else:
                 time.sleep(0.05)
 

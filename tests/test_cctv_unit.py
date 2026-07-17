@@ -157,3 +157,28 @@ class TestConfigMutators:
     def test_set_auth_enabled_updates_config(self, system):
         system.set_auth_enabled(True)
         assert system.cfg["web"]["auth"]["enabled"] is True
+
+    def test_config_saved_with_restrictive_permissions(self, system):
+        system._save_config()
+        mode = oct(Path(system.config_path).stat().st_mode)[-3:]
+        assert mode == "600"
+
+
+class TestRecordingFiles:
+    def test_recording_files_includes_fallback_extension(self, system, temp_recordings):
+        (temp_recordings / "motion_1.mp4").write_bytes(b"1")
+        (temp_recordings / "motion_2.avi").write_bytes(b"2")
+        files = {p.name for p in system._recording_files()}
+        assert "motion_1.mp4" in files
+        assert "motion_2.avi" in files
+
+    def test_recording_files_excludes_fixed_temp(self, system, temp_recordings):
+        (temp_recordings / "motion_1.fixed.avi").write_bytes(b"temp")
+        assert system._recording_files() == []
+
+
+class TestTokenRedaction:
+    def test_redact_token_masks_token(self, system):
+        system.telegram_token = "secret123"
+        assert system._redact_token("error secret123") == "error <TOKEN>"
+        assert system._redact_token("no token") == "no token"

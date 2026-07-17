@@ -94,7 +94,11 @@ class TestAuth:
 class TestDownload:
     def test_download_recordings_missing_filenames(self, client):
         test_client, _ = client
-        response = test_client.post("/api/recordings/download", json={})
+        response = test_client.post(
+            "/api/recordings/download",
+            json={},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
         assert response.status_code == 400
 
     def test_download_recordings_success(self, client, tmp_path):
@@ -108,7 +112,8 @@ class TestDownload:
 
         response = test_client.post(
             "/api/recordings/download",
-            json={"filenames": ["motion_1.avi"]}
+            json={"filenames": ["motion_1.avi"]},
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert response.status_code == 200
         assert response.headers["Content-Type"] == "application/zip"
@@ -117,7 +122,11 @@ class TestDownload:
 class TestTelegramSend:
     def test_telegram_send_missing_filenames(self, client):
         test_client, _ = client
-        response = test_client.post("/api/recordings/telegram", json={})
+        response = test_client.post(
+            "/api/recordings/telegram",
+            json={},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
         assert response.status_code == 400
 
     def test_telegram_send_success(self, client, tmp_path):
@@ -131,8 +140,32 @@ class TestTelegramSend:
 
         response = test_client.post(
             "/api/recordings/telegram",
-            json={"filenames": ["motion_1.avi"]}
+            json={"filenames": ["motion_1.avi"]},
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data["results"][0]["sent"] is True
+
+
+class TestCSRF:
+    def test_post_rejects_missing_csrf_header(self, client):
+        test_client, _ = client
+        response = test_client.post("/api/recordings/delete", json={"filenames": ["x.avi"]})
+        assert response.status_code == 403
+
+    def test_post_accepts_csrf_header(self, client, tmp_path):
+        test_client, fake_cctv = client
+        rec_dir = tmp_path / "recordings"
+        rec_dir.mkdir()
+        fake_cctv.record_dir = rec_dir
+
+        file1 = rec_dir / "motion_1.avi"
+        file1.write_bytes(b"dummy video data")
+
+        response = test_client.post(
+            "/api/recordings/delete",
+            json={"filenames": ["motion_1.avi"]},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200

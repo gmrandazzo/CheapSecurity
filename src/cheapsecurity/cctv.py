@@ -92,6 +92,7 @@ class CCTVSystem:
         self.pre_buffer_seconds = rec["pre_buffer_seconds"]
         self.codec_fourcc = rec["codec"]
         self.video_ext = rec["extension"]
+        self._recording_extensions = {self.video_ext, ".avi", ".mp4"}
 
         sto = self.cfg["storage"]
         self.max_age_days = sto["max_age_days"]
@@ -128,6 +129,7 @@ class CCTVSystem:
         self.recording_path: Path | None = None
         self._writer_fps: float = 0.0
         self._frames_written: int = 0
+        self._consecutive_frame_failures: int = 0
         self.is_recording = False
         self.last_motion_time: float = 0.0
         self.recording_started: float = 0.0
@@ -217,16 +219,35 @@ class CCTVSystem:
                 with open(temp_path, "w") as f:
                     json.dump(self.cfg, f, indent=2)
                 temp_path.replace(self.config_path)
+                Path(self.config_path).chmod(0o600)
             except Exception as e:
                 logger.error(f"Failed to save config: {e}")
                 if temp_path.exists():
                     temp_path.unlink()
 
+    def _recording_files(self) -> list:
+        """Return existing recording files, excluding temp/fix files."""
+        files = []
+        for path in self.record_dir.iterdir():
+            try:
+                if (
+                    path.is_file()
+                    and path.suffix in self._recording_extensions
+                    and not path.name.endswith(".fixed" + path.suffix)
+                ):
+                    files.append(path)
+            except OSError:
+                continue
+        return files
+
     def list_recordings(self) -> list:
         """Return metadata for all recorded videos, newest first."""
         videos = []
-        for path in sorted(self.record_dir.glob(f"*{self.video_ext}"), reverse=True):
-            stat = path.stat()
+        for path in sorted(self._recording_files(), reverse=True):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
             videos.append(
                 {
                     "filename": path.name,
@@ -249,19 +270,33 @@ class CCTVSystem:
         if self.delete_old_on_startup:
             self._cleanup_storage()
 
-        assert self.cap is not None, "Camera capture not initialized"
         target_frame_interval = 1.0 / self.fps if self.fps > 0 else 1.0 / 15.0
         while self.running:
             loop_start = time.time()
 
+            # Reconnect if the camera was released (e.g. by too many frame failures)
+            if self.cap is None:
+                if not self._open_capture():
+                    logger.error("Camera reconnect failed, halting engine.")
+                    return
+                continue
+
             with self._cap_lock:
                 if self.cap is None:
-                    break
+                    continue
                 ok, frame = self.cap.read()
             if not ok or frame is None:
-                logger.warning("Frame capture failed, retrying...")
+                self._consecutive_frame_failures += 1
+                logger.warning(
+                    f"Frame capture failed ({self._consecutive_frame_failures} consecutive), retrying..."
+                )
+                if self._consecutive_frame_failures >= 10:
+                    logger.error("Too many frame failures; releasing camera for reconnect.")
+                    self._release_capture()
+                    self._consecutive_frame_failures = 0
                 time.sleep(0.1)
                 continue
+            self._consecutive_frame_failures = 0
 
             # Enhance low-light visibility when night mode is on
             frame = self._apply_night_mode(frame)
@@ -468,7 +503,9 @@ class CCTVSystem:
         logger.info(f"Recording started: {self.recording_path.name}")
 
         # Dump pre-buffer for motion-triggered recordings only
-        if not self._manual_record_chat_id:
+        with self._state_lock:
+            manual_chat_id = self._manual_record_chat_id
+        if not manual_chat_id:
             for encoded in self._pre_buffer:
                 decoded = cv2.imdecode(np.frombuffer(encoded, np.uint8), cv2.IMREAD_COLOR)
                 if decoded is not None:
@@ -517,28 +554,34 @@ class CCTVSystem:
                 manual_chat_id = self._manual_record_chat_id
                 self._manual_record_chat_id = None
 
-            # Duration fix is only safe for manual recordings that have no
-            # pre-buffer. Motion recordings include pre-buffer frames whose
-            # original wall-clock time is not part of actual_duration.
             if manual_chat_id:
-                self._fix_video_duration(self.recording_path, actual_duration)
-
-            size = self.recording_path.stat().st_size
-            logger.info(f"Recording saved: {self.recording_path.name} ({self._human_size(size)})")
-
-            if manual_chat_id:
-                try:
-                    self._send_telegram_video(self.recording_path, chat_id=manual_chat_id)
-                except Exception as e:
-                    logger.error(f"Failed to send manual Telegram video: {e}")
+                # Finalize manual recordings in the background so the capture
+                # loop is not blocked by ffmpeg + Telegram upload.
+                frames_written = self._frames_written
+                writer_fps = self._writer_fps
+                path = self.recording_path
+                threading.Thread(
+                    target=self._finalize_manual_recording,
+                    args=(path, manual_chat_id, actual_duration, frames_written, writer_fps),
+                    daemon=True,
+                ).start()
             else:
+                size = self.recording_path.stat().st_size
+                logger.info(
+                    f"Recording saved: {self.recording_path.name} ({self._human_size(size)})"
+                )
                 self._maybe_send_telegram(self.recording_path)
 
             self.recording_path = None
         self.is_recording = False
-        self.motion_active = False
 
-    def _fix_video_duration(self, path: Path, actual_duration: float) -> None:
+    def _fix_video_duration(
+        self,
+        path: Path,
+        actual_duration: float,
+        frames_written: int | None = None,
+        writer_fps: float | None = None,
+    ) -> None:
         """Adjust container frame rate so playback length matches wall-clock time.
 
         OpenCV's VideoWriter uses the loop's estimated FPS when the file is
@@ -546,16 +589,18 @@ class CCTVSystem:
         I/O), the saved file can play back too fast. Rewriting the container
         header with the actual FPS (frame_count / actual_duration) fixes this.
         """
-        if actual_duration <= 0 or self._frames_written <= 0 or self._writer_fps <= 0:
+        frames_written = frames_written if frames_written is not None else self._frames_written
+        writer_fps = writer_fps if writer_fps is not None else self._writer_fps
+        if actual_duration <= 0 or frames_written <= 0 or writer_fps <= 0:
             return
 
-        playback_duration = self._frames_written / self._writer_fps
+        playback_duration = frames_written / writer_fps
         drift = abs(playback_duration - actual_duration)
         # Only fix if the drift is meaningful (more than half a second or 10%)
         if drift < 0.5 and drift / max(actual_duration, 1.0) < 0.1:
             return
 
-        correct_fps = self._frames_written / actual_duration
+        correct_fps = frames_written / actual_duration
         correct_fps = max(1.0, min(60.0, correct_fps))
 
         if not shutil.which("ffmpeg"):
@@ -585,13 +630,34 @@ class CCTVSystem:
             )
             fixed_path.replace(path)
             logger.info(
-                f"Fixed video FPS from {self._writer_fps:.2f} to {correct_fps:.2f} "
-                f"({self._frames_written} frames / {actual_duration:.2f}s)"
+                f"Fixed video FPS from {writer_fps:.2f} to {correct_fps:.2f} "
+                f"({frames_written} frames / {actual_duration:.2f}s)"
             )
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to fix video duration: {e.stderr.decode(errors='ignore')}")
+            with contextlib.suppress(Exception):
+                fixed_path.unlink()
         except Exception as e:
             logger.error(f"Failed to fix video duration: {e}")
+            with contextlib.suppress(Exception):
+                fixed_path.unlink()
+
+    def _finalize_manual_recording(
+        self,
+        path: Path,
+        chat_id: str,
+        actual_duration: float,
+        frames_written: int,
+        writer_fps: float,
+    ) -> None:
+        """Fix duration and upload a manual recording without blocking the main loop."""
+        self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+        size = path.stat().st_size
+        logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+        try:
+            self._send_telegram_video(path, chat_id=chat_id)
+        except Exception as e:
+            logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
 
     # ------------------------------------------------------------------
     # Streaming
@@ -713,6 +779,11 @@ class CCTVSystem:
             daemon=True,
         ).start()
 
+    def _redact_token(self, text: str) -> str:
+        if not self.telegram_token:
+            return text
+        return text.replace(self.telegram_token, "<TOKEN>")
+
     def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
         try:
             target_chat = chat_id or self.telegram_chat_id
@@ -732,8 +803,7 @@ class CCTVSystem:
                 raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
             logger.info(f"Telegram video sent: {video_path.name}")
         except Exception as e:
-            logger.error(f"Failed to send Telegram video: {e}")
-            raise
+            logger.error(f"Failed to send Telegram video: {self._redact_token(str(e))}")
 
     def _send_telegram_photo(self, image_bytes: bytes, chat_id: str, caption: str = "") -> None:
         try:
@@ -745,8 +815,7 @@ class CCTVSystem:
                 raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
             logger.info(f"Telegram snapshot sent to {chat_id}")
         except Exception as e:
-            logger.error(f"Failed to send Telegram snapshot: {e}")
-            raise
+            logger.error(f"Failed to send Telegram snapshot: {self._redact_token(str(e))}")
 
     def _send_telegram_message(self, text: str, chat_id: str) -> None:
         try:
@@ -756,7 +825,7 @@ class CCTVSystem:
             if response.status_code != 200:
                 logger.error(f"Telegram message error {response.status_code}: {response.text}")
         except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            logger.error(f"Failed to send Telegram message: {self._redact_token(str(e))}")
 
     def _telegram_poll_loop(self) -> None:
         logger.info("Starting Telegram command polling...")
@@ -781,7 +850,7 @@ class CCTVSystem:
                     self._telegram_offset = max(self._telegram_offset, update["update_id"])
                     self._handle_telegram_update(update)
             except Exception as e:
-                logger.error(f"Telegram poll error: {e}")
+                logger.error(f"Telegram poll error: {self._redact_token(str(e))}")
             time.sleep(2)
         logger.info("Telegram command polling stopped.")
 
@@ -833,7 +902,7 @@ class CCTVSystem:
                 daemon=True,
             ).start()
         except Exception as e:
-            logger.error(f"Failed to handle snapshot command: {e}")
+            logger.error(f"Failed to handle snapshot command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to take snapshot.", chat_id)
 
     def _handle_telegram_video(self, seconds: int, chat_id: str) -> None:
@@ -863,7 +932,7 @@ class CCTVSystem:
                 self._manual_record_chat_id = chat_id
                 self._manual_recording_active = True
         except Exception as e:
-            logger.error(f"Failed to handle video command: {e}")
+            logger.error(f"Failed to handle video command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to start recording.", chat_id)
 
     # ------------------------------------------------------------------
@@ -880,10 +949,14 @@ class CCTVSystem:
             f"Low disk space: {free_gb:.2f} GB free. "
             f"Deleting up to {self.emergency_delete_count} oldest recordings."
         )
-        files = sorted(
-            (p for p in self.record_dir.glob(f"*{self.video_ext}") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-        )
+
+        def _mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except FileNotFoundError:
+                return float("inf")
+
+        files = sorted(self._recording_files(), key=_mtime)
         deleted = 0
         for path in files[: self.emergency_delete_count]:
             if path.exists():
@@ -900,14 +973,17 @@ class CCTVSystem:
         logger.info("Running storage cleanup...")
         now = datetime.now()
         files = sorted(
-            (p for p in self.record_dir.glob(f"*{self.video_ext}") if p.is_file()),
+            self._recording_files(),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
 
         total_size = 0
         for path in files:
-            stat = path.stat()
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
             age_days = (now - datetime.fromtimestamp(stat.st_mtime)).total_seconds() / 86400
             if age_days > self.max_age_days:
                 logger.info(f"Deleting old recording: {path.name}")
@@ -919,12 +995,16 @@ class CCTVSystem:
         if total_size > max_bytes:
             # Delete oldest until under limit
             for path in reversed(files):
-                if path.exists():
+                if not path.exists():
+                    continue
+                try:
                     total_size -= path.stat().st_size
-                    logger.info(f"Deleting recording to free space: {path.name}")
-                    path.unlink(missing_ok=True)
-                    if total_size <= max_bytes:
-                        break
+                except FileNotFoundError:
+                    continue
+                logger.info(f"Deleting recording to free space: {path.name}")
+                path.unlink(missing_ok=True)
+                if total_size <= max_bytes:
+                    break
 
         logger.info(f"Storage usage: {self._human_size(total_size)}")
 

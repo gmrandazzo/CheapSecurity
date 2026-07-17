@@ -97,7 +97,7 @@ async function deleteSelected() {
   try {
     const res = await fetch('/api/recordings/delete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ filenames })
     });
     const data = await res.json();
@@ -118,7 +118,7 @@ async function sendSelectedToTelegram() {
   try {
     const res = await fetch('/api/recordings/telegram', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ filenames })
     });
     const data = await res.json();
@@ -139,7 +139,7 @@ async function downloadSelected() {
   try {
     const res = await fetch('/api/recordings/download', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ filenames })
     });
     if (!res.ok) throw new Error('Download failed');
@@ -179,7 +179,7 @@ async function setNightMode(enabled) {
   try {
     const res = await fetch('/api/settings/night_mode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -194,7 +194,7 @@ async function setTelegram(enabled) {
   try {
     const res = await fetch('/api/settings/telegram', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -209,7 +209,7 @@ async function setNotifications(enabled) {
   try {
     const res = await fetch('/api/settings/notifications', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -224,7 +224,7 @@ async function setAuth(enabled) {
   try {
     const res = await fetch('/api/settings/auth', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
