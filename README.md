@@ -55,7 +55,7 @@ Key Features
    This creates a venv that can see the system site-packages, so the system `cv2` is available inside the venv.
 
    ```bash
-   cd /home/marco/CheapSecurity
+   cd $HOME/CheapSecurity
    python3 -m venv venv --system-site-packages
    source venv/bin/activate
    pip install -e .
@@ -66,7 +66,7 @@ Key Features
    Use this if you do not have a system OpenCV or prefer a self-contained venv.
 
    ```bash
-   cd /home/marco/CheapSecurity
+   cd $HOME/CheapSecurity
    python3 -m venv venv
    source venv/bin/activate
    pip install opencv-python-headless
@@ -183,7 +183,7 @@ Fill in the `telegram` section of `config.json`:
 Then restart the service:
 
 ```bash
-sudo systemctl restart cheapsecurity@marco.service
+sudo systemctl restart cheapsecurity@$(whoami).service
 ```
 
 
@@ -287,19 +287,19 @@ Do **not** expose Flask's development server to the internet. Use **Gunicorn** b
 It is already defined in `pyproject.toml`:
 
 ```bash
-cd /home/marco/CheapSecurity
+cd $HOME/CheapSecurity
 source venv/bin/activate
 pip install -e .
 ```
 
 ### 2. Run with systemd + Gunicorn
 
-Copy the service template and enable it (replace `marco` with your username):
+Copy the service template and enable it from a user shell:
 
 ```bash
 sudo cp cheapsecurity.service /etc/systemd/system/cheapsecurity@.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now cheapsecurity@marco.service
+sudo systemctl enable --now cheapsecurity@$(whoami).service
 ```
 
 This binds Gunicorn to `0.0.0.0:5000` with **one worker and four threads**, so the dashboard and stream are reachable directly on your network. Only one worker is used because the camera must be opened by a single process.
@@ -309,7 +309,7 @@ This binds Gunicorn to `0.0.0.0:5000` with **one worker and four threads**, so t
 View logs:
 
 ```bash
-sudo journalctl -u cheapsecurity@marco.service -f
+sudo journalctl -u cheapsecurity@$(whoami).service -f
 ```
 
 ## Project structure
@@ -340,11 +340,11 @@ If recordings stop appearing:
 
 1. Check the service is running:
    ```bash
-   sudo systemctl status cheapsecurity@marco.service
+   sudo systemctl status cheapsecurity@$(whoami).service
    ```
 2. Check logs:
    ```bash
-   sudo journalctl -u cheapsecurity@marco.service -f
+   sudo journalctl -u cheapsecurity@$(whoami).service -f
    ```
 3. Run the diagnostic script:
    ```bash
