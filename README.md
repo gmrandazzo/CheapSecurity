@@ -278,6 +278,12 @@ Toggle it from the dashboard. It is applied to the live stream, recordings, and 
   - **Download selected** (ZIP)
   - **Delete selected**
 
+### Preview
+
+The GIF below shows the dashboard in action: live MJPEG stream, real-time status panel, quick settings toggles, and the recordings list with bulk actions.
+
+![CheapSecurity web interface preview](preview.gif)
+
 ## Production deployment
 
 Do **not** expose Flask's development server to the internet. Use **Gunicorn** behind the built-in auth or another reverse proxy you trust.
