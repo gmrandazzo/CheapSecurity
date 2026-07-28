@@ -48,6 +48,16 @@
     "min_interval_minutes": 5,
     "poll_commands": true
   },
+  "rtsp": {
+    "enabled": false,
+    "port": 8554,
+    "path": "live",
+    "width": 1280,
+    "height": 720,
+    "fps": 15,
+    "mediamtx_binary": "/usr/local/bin/mediamtx",
+    "mediamtx_config": "rtsp/mediamtx.yml"
+  },
   "web": {
     "host": "0.0.0.0",
     "port": 5000,

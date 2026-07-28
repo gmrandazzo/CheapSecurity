@@ -148,6 +148,64 @@ class TestTelegramSend:
         assert data["results"][0]["sent"] is True
 
 
+class TestSnapshot:
+    def test_snapshot_returns_jpeg(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.get_frame.return_value = b"fake-jpeg-data"
+        response = test_client.post(
+            "/api/snapshot",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200
+        assert response.headers["Content-Type"] == "image/jpeg"
+        assert response.data == b"fake-jpeg-data"
+
+    def test_snapshot_no_frame_returns_503(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.get_frame.return_value = None
+        response = test_client.post(
+            "/api/snapshot",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 503
+
+
+class TestVideo:
+    def test_video_defaults_to_10_seconds(self, client):
+        test_client, fake_cctv = client
+        response = test_client.post(
+            "/api/video",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["chat_id"] is None
+        fake_cctv.trigger_manual_recording.assert_called_once_with(10, None)
+
+    def test_video_uses_configured_chat_id(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.telegram_enabled = True
+        fake_cctv.cfg["telegram"] = {"chat_id": "12345"}
+        response = test_client.post(
+            "/api/video",
+            json={"seconds": 5},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["chat_id"] == "12345"
+        fake_cctv.trigger_manual_recording.assert_called_once_with(5, "12345")
+
+    def test_video_clamps_and_rejects_invalid_seconds(self, client):
+        test_client, fake_cctv = client
+        response = test_client.post(
+            "/api/video",
+            json={"seconds": "abc"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 400
+
+
 class TestCSRF:
     def test_post_rejects_missing_csrf_header(self, client):
         test_client, _ = client

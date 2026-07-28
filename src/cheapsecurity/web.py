@@ -34,6 +34,7 @@ from types import FrameType
 from typing import TypeAlias
 
 import cv2
+from flasgger import Swagger
 from flask import (
     Flask,
     Response,
@@ -49,6 +50,36 @@ from flask import (
 from cheapsecurity.cctv import CCTVSystem
 
 app = Flask(__name__)
+Swagger(
+    app,
+    template={
+        "swagger": "2.0",
+        "info": {
+            "title": "CheapSecurity API",
+            "description": "REST API and MJPEG stream for the CheapSecurity CCTV system.",
+            "version": "0.1.0",
+        },
+        "securityDefinitions": {
+            "basicAuth": {
+                "type": "basic",
+                "description": "HTTP Basic Auth configured in config.json web.auth",
+            }
+        },
+    },
+    config={
+        "specs": [
+            {
+                "endpoint": "apispec_1",
+                "route": "/apispec_1.json",
+                "rule_filter": lambda rule: True,
+                "model_filter": lambda tag: True,
+            }
+        ],
+        "specs_route": "/api/",
+        "headers": [],
+    },
+    merge=True,
+)
 cctv: CCTVSystem | None = None
 
 RouteReturn: TypeAlias = Response | tuple[Response | str, int] | str
@@ -66,6 +97,17 @@ def init_cctv(config_path: str = "config.json") -> CCTVSystem:
 def _check_auth() -> Response | None:
     auth_cfg = (cctv.cfg.get("web") or {}).get("auth") if cctv else None
     if not auth_cfg or not auth_cfg.get("enabled"):
+        return None
+    # Allow the local RTSP publisher (FFmpeg) to read the MJPEG stream
+    # without credentials when auth is enabled.
+    if request.path == "/video_feed" and request.remote_addr in ("127.0.0.1", "::1"):
+        return None
+    # Swagger UI and its static assets / OpenAPI spec must be reachable.
+    if (
+        request.path == "/api/"
+        or request.path.startswith("/flasgger_static")
+        or request.path.startswith("/apispec_")
+    ):
         return None
     expected_user = auth_cfg.get("username", "admin")
     expected_pass = auth_cfg.get("password", "changeme")
@@ -99,6 +141,10 @@ def require_csrf() -> Response | None:
         return None
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return None
+    # Allow requests originating from the Swagger UI page.
+    referrer = request.referrer or ""
+    if "/api/" in referrer:
+        return None
     resp = make_response(jsonify({"error": "CSRF protection: missing X-Requested-With header"}))
     resp.status_code = 403
     return resp
@@ -112,6 +158,43 @@ def index() -> str:
 
 @app.route("/api/status")
 def api_status() -> RouteReturn:
+    """Get the current CCTV engine status.
+    ---
+    tags:
+      - status
+    security:
+      - basicAuth: []
+    responses:
+      200:
+        description: Current engine status
+        schema:
+          type: object
+          properties:
+            running: {type: boolean}
+            is_recording: {type: boolean}
+            motion_active: {type: boolean}
+            recording_file: {type: string, nullable: true}
+            resolution: {type: string}
+            fps: {type: number}
+            night_mode: {type: boolean}
+            notifications_enabled: {type: boolean}
+            telegram_enabled: {type: boolean}
+            auth_enabled: {type: boolean}
+        examples:
+          application/json:
+            running: true
+            is_recording: false
+            motion_active: false
+            recording_file: null
+            resolution: "2560x1440"
+            fps: 30.0
+            night_mode: false
+            notifications_enabled: false
+            telegram_enabled: true
+            auth_enabled: true
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     return jsonify(
@@ -134,6 +217,37 @@ def api_status() -> RouteReturn:
 
 @app.route("/api/recordings")
 def api_recordings() -> RouteReturn:
+    """List all recorded videos, newest first.
+    ---
+    tags:
+      - recordings
+    security:
+      - basicAuth: []
+    responses:
+      200:
+        description: List of recordings
+        schema:
+          type: object
+          properties:
+            recordings:
+              type: array
+              items:
+                type: object
+                properties:
+                  filename: {type: string}
+                  size_bytes: {type: integer}
+                  size_human: {type: string}
+                  created: {type: string, format: date-time}
+        examples:
+          application/json:
+            recordings:
+              - filename: motion_20260710_232000.avi
+                size_bytes: 12582912
+                size_human: "12.0 MB"
+                created: "2026-07-10T23:20:00"
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     return jsonify({"recordings": cctv.list_recordings()})
@@ -141,6 +255,41 @@ def api_recordings() -> RouteReturn:
 
 @app.route("/api/recordings/delete", methods=["POST"])
 def api_delete_recordings() -> RouteReturn:
+    """Delete one or more recordings.
+    ---
+    tags:
+      - recordings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            filenames:
+              type: array
+              items: {type: string}
+              example: ["motion_20260101_120000.avi"]
+    responses:
+      200:
+        description: Per-file deletion results
+        examples:
+          application/json:
+            results:
+              - filename: motion_20260710_232000.avi
+                deleted: true
+              - filename: notfound.avi
+                deleted: false
+                error: "Invalid file"
+      400:
+        description: No filenames provided
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -166,6 +315,35 @@ def api_delete_recordings() -> RouteReturn:
 
 @app.route("/api/recordings/download", methods=["POST"])
 def api_download_recordings() -> RouteReturn:
+    """Download selected recordings as a ZIP file.
+    ---
+    tags:
+      - recordings
+    security:
+      - basicAuth: []
+    produces:
+      - application/zip
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            filenames:
+              type: array
+              items: {type: string}
+              example: ["motion_20260101_120000.avi"]
+    responses:
+      200:
+        description: ZIP file download
+      400:
+        description: No filenames provided
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -210,6 +388,38 @@ def api_download_recordings() -> RouteReturn:
 
 @app.route("/api/recordings/telegram", methods=["POST"])
 def api_send_telegram_recordings() -> RouteReturn:
+    """Send selected recordings to Telegram.
+    ---
+    tags:
+      - recordings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            filenames:
+              type: array
+              items: {type: string}
+              example: ["motion_20260101_120000.avi"]
+    responses:
+      200:
+        description: Per-file send results
+        examples:
+          application/json:
+            results:
+              - filename: motion_20260710_232000.avi
+                sent: true
+      400:
+        description: No filenames provided
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -239,6 +449,31 @@ def api_send_telegram_recordings() -> RouteReturn:
 
 @app.route("/api/settings")
 def api_settings() -> RouteReturn:
+    """Get current toggleable settings.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    responses:
+      200:
+        description: Current settings
+        schema:
+          type: object
+          properties:
+            night_mode: {type: boolean}
+            notifications_enabled: {type: boolean}
+            telegram_enabled: {type: boolean}
+            auth_enabled: {type: boolean}
+        examples:
+          application/json:
+            night_mode: false
+            notifications_enabled: false
+            telegram_enabled: true
+            auth_enabled: true
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     return jsonify(
@@ -253,6 +488,31 @@ def api_settings() -> RouteReturn:
 
 @app.route("/api/settings/telegram", methods=["POST"])
 def api_set_telegram() -> RouteReturn:
+    """Enable or disable Telegram uploads.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New Telegram setting
+        examples:
+          application/json:
+            telegram_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -263,6 +523,31 @@ def api_set_telegram() -> RouteReturn:
 
 @app.route("/api/settings/night_mode", methods=["POST"])
 def api_set_night_mode() -> RouteReturn:
+    """Enable or disable night mode.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New night mode setting
+        examples:
+          application/json:
+            night_mode: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -273,6 +558,31 @@ def api_set_night_mode() -> RouteReturn:
 
 @app.route("/api/settings/notifications", methods=["POST"])
 def api_set_notifications() -> RouteReturn:
+    """Enable or disable email notifications.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New notifications setting
+        examples:
+          application/json:
+            notifications_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -283,6 +593,31 @@ def api_set_notifications() -> RouteReturn:
 
 @app.route("/api/settings/auth", methods=["POST"])
 def api_set_auth() -> RouteReturn:
+    """Enable or disable built-in HTTP Basic Auth.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New auth setting
+        examples:
+          application/json:
+            auth_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
     if cctv is None:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
@@ -291,6 +626,84 @@ def api_set_auth() -> RouteReturn:
     )
     cctv.set_auth_enabled(enabled)
     return jsonify({"auth_enabled": enabled})
+
+
+@app.route("/api/snapshot", methods=["POST"])
+def api_snapshot() -> RouteReturn:
+    """Capture and return a single JPEG snapshot from the live camera feed.
+    ---
+    tags:
+      - camera
+    security:
+      - basicAuth: []
+    produces:
+      - image/jpeg
+    responses:
+      200:
+        description: JPEG snapshot image
+        schema:
+          type: string
+          format: binary
+      503:
+        description: CCTV not initialized or no frame available
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    frame = cctv.get_frame()
+    if frame is None:
+        return jsonify({"error": "No camera frame available"}), 503
+    return Response(frame, mimetype="image/jpeg")
+
+
+@app.route("/api/video", methods=["POST"])
+def api_video() -> RouteReturn:
+    """Trigger a manual video recording for a configurable number of seconds.
+    ---
+    tags:
+      - camera
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            seconds:
+              type: integer
+              minimum: 1
+              maximum: 60
+              default: 10
+              example: 10
+    responses:
+      200:
+        description: Recording started
+        schema:
+          type: object
+          properties:
+            recording_until: {type: number}
+            chat_id: {type: string, nullable: true}
+        examples:
+          application/json:
+            recording_until: 1752193290.5
+            chat_id: "123456789"
+      400:
+        description: Invalid seconds value
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    try:
+        seconds = int(data.get("seconds", 10))
+    except (TypeError, ValueError):
+        return jsonify({"error": "seconds must be an integer"}), 400
+    seconds = max(1, min(60, seconds))
+    chat_id = cctv.cfg.get("telegram", {}).get("chat_id") if cctv.telegram_enabled else None
+    cctv.trigger_manual_recording(seconds, chat_id)
+    return jsonify({"recording_until": time.time() + seconds, "chat_id": chat_id})
 
 
 @app.route("/recordings/<path:filename>")

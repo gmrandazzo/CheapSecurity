@@ -1,0 +1,14 @@
+# Minimal MediaMTX configuration for CheapSecurity RTSP output.
+# MediaMTX accepts the FFmpeg publisher on the configured path and serves
+# RTSP clients on port 8554.
+
+logLevel: warn
+rtspAddress: :8554
+rtspTransports: [tcp]
+rtmpAddress: ""
+hlsAddress: ""
+webrtcAddress: ""
+srtAddress: ""
+
+paths:
+  all:

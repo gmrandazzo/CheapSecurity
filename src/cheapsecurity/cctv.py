@@ -46,6 +46,8 @@ import cv2
 import numpy as np
 import requests
 
+from cheapsecurity.rtsp import RTSPPublisher
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -84,6 +86,13 @@ class CCTVSystem:
 
         web = self.cfg["web"]
         self.stream_scale = max(0.05, min(1.0, web.get("stream_scale", 1.0)))
+
+        rtsp = self.cfg.get("rtsp", {})
+        self._rtsp_publisher = RTSPPublisher(
+            rtsp,
+            web.get("host", "127.0.0.1"),
+            web.get("port", 5000),
+        )
 
         rec = self.cfg["recording"]
         self.record_dir = Path(rec["dir"]).resolve()
@@ -167,6 +176,7 @@ class CCTVSystem:
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        self._rtsp_publisher.start()
         if self.telegram_poll_commands and self.telegram_token and self.telegram_chat_id:
             self._telegram_poll_thread = threading.Thread(
                 target=self._telegram_poll_loop, daemon=True
@@ -180,6 +190,7 @@ class CCTVSystem:
             self.thread.join(timeout=5.0)
         if self._telegram_poll_thread:
             self._telegram_poll_thread.join(timeout=2.0)
+        self._rtsp_publisher.stop()
         self._release_capture()
         self._stop_recording()
         logger.info("CCTV engine stopped.")
@@ -905,6 +916,14 @@ class CCTVSystem:
             logger.error(f"Failed to handle snapshot command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to take snapshot.", chat_id)
 
+    def trigger_manual_recording(self, seconds: int, chat_id: str | None = None) -> None:
+        """Start or extend a manual recording for the given number of seconds."""
+        seconds = max(1, min(60, seconds))
+        with self._state_lock:
+            self._manual_record_until = time.time() + seconds
+            self._manual_record_chat_id = chat_id
+            self._manual_recording_active = True
+
     def _handle_telegram_video(self, seconds: int, chat_id: str) -> None:
         try:
             seconds = max(1, min(60, seconds))
@@ -928,9 +947,7 @@ class CCTVSystem:
                 else:
                     self._send_telegram_message(f"Recording {seconds} seconds video...", chat_id)
 
-                self._manual_record_until = time.time() + seconds
-                self._manual_record_chat_id = chat_id
-                self._manual_recording_active = True
+            self.trigger_manual_recording(seconds, chat_id)
         except Exception as e:
             logger.error(f"Failed to handle video command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to start recording.", chat_id)

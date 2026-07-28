@@ -24,6 +24,8 @@ Key Features
   - Bot commands: `/snapshot`, `/video <seconds>`, `/help`
 - **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
+- **Interactive Swagger UI** at `/api/` for the REST API
+- **RTSP output** via MediaMTX + FFmpeg (optional, disabled by default)
 - **Storage cleanup** by age, total size, and emergency low-disk cleanup
 - **systemd autostart** ready
 - Licensed under **GNU AGPLv3**
@@ -140,6 +142,12 @@ Edit `config.json`:
 | `storage` | `delete_old_on_startup` | If `false`, old recordings are kept when the app restarts |
 | `storage` | `emergency_free_space_gb` | If free disk space drops below this, delete old recordings before a new one |
 | `storage` | `emergency_delete_count` | How many oldest recordings to delete in an emergency cleanup |
+| `rtsp` | `enabled` | Publish an RTSP stream in addition to the HTTP MJPEG stream |
+| `rtsp` | `port` | RTSP listener port (default `8554`) |
+| `rtsp` | `path` | RTSP path (default `live`) |
+| `rtsp` | `width`, `height`, `fps` | Resolution and frame rate for the RTSP stream |
+| `rtsp` | `mediamtx_binary` | Path to the MediaMTX executable |
+| `rtsp` | `mediamtx_config` | Path to `rtsp/mediamtx.yml` |
 | `web` | `host`, `port` | Dashboard bind address and port |
 | `web` | `stream_scale` | Downscale factor for live stream (saves bandwidth/CPU) |
 | `web.auth` | `enabled`, `username`, `password` | Optional HTTP Basic Auth |
@@ -267,6 +275,66 @@ Toggle it from the dashboard. It is applied to the live stream, recordings, and 
 - If free disk space drops below `emergency_free_space_gb`, the oldest `emergency_delete_count` recordings are deleted before starting a new clip.
 - Recordings older than `max_age_days` or exceeding `max_size_gb` are removed during periodic cleanup.
 
+## REST API & Swagger UI
+
+CheapSecurity exposes a small REST API and serves an interactive **Swagger UI** at:
+
+```text
+http://<odroid-ip>:5000/api/
+```
+
+The Swagger page documents every endpoint and shows example request/response bodies. You can try the endpoints directly from the browser.
+
+### Authentication
+
+If `web.auth.enabled` is `true`, the API uses **HTTP Basic Auth**. In Swagger, click **Authorize** and enter your username/password. From scripts, include the credentials with curl:
+
+```bash
+curl -u admin:changeme http://<odroid-ip>:5000/api/status
+```
+
+### CSRF protection
+
+The web dashboard protects POST endpoints with a CSRF check (the `X-Requested-With: XMLHttpRequest` header). Requests made from the Swagger UI page are automatically allowed. From your own scripts, add the header:
+
+```bash
+curl -u admin:changeme \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -X POST http://<odroid-ip>:5000/api/settings/night_mode \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+### Key endpoints
+
+- `GET /api/status` — current engine state
+- `GET /api/recordings` — list saved videos
+- `POST /api/recordings/delete` — delete selected recordings
+- `POST /api/recordings/download` — download selected recordings as ZIP
+- `POST /api/recordings/telegram` — send selected recordings to Telegram
+- `POST /api/settings/{telegram,night_mode,notifications,auth}` — toggle features
+- `POST /api/snapshot` — capture and download a JPEG snapshot
+- `POST /api/video` — start a manual recording (default 10s, max 60s)
+
+### Example: snapshot from the command line
+
+```bash
+curl -u admin:changeme \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -X POST http://<odroid-ip>:5000/api/snapshot \
+  --output snapshot.jpg
+```
+
+### Example: start a 10-second manual recording
+
+```bash
+curl -u admin:changeme \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -X POST http://<odroid-ip>:5000/api/video \
+  -H "Content-Type: application/json" \
+  -d '{"seconds": 10}'
+```
+
 ## Web interface
 
 - Live stream
@@ -277,12 +345,186 @@ Toggle it from the dashboard. It is applied to the live stream, recordings, and 
   - **Send to Telegram**
   - **Download selected** (ZIP)
   - **Delete selected**
+- Link to the **Swagger API docs** at `/api/`
 
 ### Preview
 
 The GIF below shows the dashboard in action: live MJPEG stream, real-time status panel, quick settings toggles, and the recordings list with bulk actions.
 
 ![CheapSecurity web interface preview](preview.gif)
+
+## Enabling RTSP output (optional)
+
+CheapSecurity can republish the live MJPEG stream as an **RTSP** stream. This lets you view the camera in VLC, IP-camera apps, NVRs, or any software that supports RTSP, without using the web dashboard.
+
+RTSP is **disabled by default** because it adds extra CPU load.
+
+### Quick start: enable RTSP
+
+1. Install **FFmpeg** and **MediaMTX** (see the options below).
+2. Make sure `rtsp/mediamtx.yml` exists in the project folder.
+3. Set `"rtsp": { "enabled": true, ... }` in `config.json`.
+4. Restart the service:
+   ```bash
+   sudo systemctl restart cheapsecurity@$(whoami).service
+   ```
+5. Open `rtsp://<odroid-ip>:8554/live` in your RTSP player.
+
+The subsections below explain each step in detail.
+
+### How it works
+
+1. CheapSecurity starts a local **MediaMTX** server on the configured RTSP port.
+2. It launches **FFmpeg** to read the HTTP MJPEG stream from `http://127.0.0.1:5000/video_feed`.
+3. FFmpeg republishes the stream to MediaMTX on `rtsp://127.0.0.1:<port>/<path>`.
+4. Any RTSP client on your network can connect to `rtsp://<odroid-ip>:<port>/<path>`.
+
+### 1. Install dependencies
+
+You need **FFmpeg** and **MediaMTX**.
+
+> **Note:** The commands below use `sudo`. If your board's root access is via `su` instead, run `su` first and execute the commands without `sudo`.
+
+- **FFmpeg** must be installed (`ffmpeg -version`). It is also used for the video-duration fix.
+- **MediaMTX** can be installed in several ways:
+
+#### Option A — download a prebuilt binary (fastest)
+
+Download the static binary that matches your board from <https://github.com/bluenviron/mediamtx/releases>. For an Odroid XU4 (ARMv7) choose the ARMv7 build.
+
+```bash
+wget https://github.com/bluenviron/mediamtx/releases/download/v1.12.0/mediamtx_v1.12.0_linux_armv7.tar.gz
+tar -xzf mediamtx_v1.12.0_linux_armv7.tar.gz
+sudo install -m 755 mediamtx /usr/local/bin/mediamtx
+```
+
+> Replace `v1.12.0` with the latest release.
+
+Then copy the bundled config file into the project:
+
+```bash
+mkdir -p rtsp
+cp mediamtx.yml rtsp/mediamtx.yml
+```
+
+The repository already contains a minimal `rtsp/mediamtx.yml` that works with the default settings; you only need to copy the one from the MediaMTX archive if you want the upstream defaults.
+
+#### Option B — compile MediaMTX from source on the Odroid
+
+If you prefer to build from source, install Go (≥ 1.26) and build directly on the board:
+
+```bash
+# Install Go from your distribution or from https://go.dev/dl/
+sudo apt update
+sudo apt install golang-go git
+
+# Clone and build
+git clone https://github.com/bluenviron/mediamtx /tmp/mediamtx
+cd /tmp/mediamtx
+go generate ./...
+CGO_ENABLED=0 go build .
+
+# Install the binary
+sudo install -m 755 mediamtx /usr/local/bin/mediamtx
+```
+
+This produces a native ARMv7 `mediamtx` binary.
+
+#### Option C — cross-compile for ARMv7 from another machine
+
+If you want to compile on a faster x86/amd64 machine and copy the binary to the Odroid, use Go cross-compilation:
+
+```bash
+git clone https://github.com/bluenviron/mediamtx
+cd mediamtx
+go generate ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build .
+```
+
+Then copy the resulting `mediamtx` binary to the Odroid, for example:
+
+```bash
+scp mediamtx marco@<odroid-ip>:/tmp/mediamtx
+ssh marco@<odroid-ip> "sudo install -m 755 /tmp/mediamtx /usr/local/bin/mediamtx"
+```
+
+On the Odroid, also copy the config file:
+
+```bash
+mkdir -p rtsp
+cp mediamtx.yml rtsp/mediamtx.yml
+```
+
+### 2. Enable RTSP in `config.json`
+
+```json
+"rtsp": {
+  "enabled": true,
+  "port": 8554,
+  "path": "live",
+  "width": 1280,
+  "height": 720,
+  "fps": 15,
+  "mediamtx_binary": "/usr/local/bin/mediamtx",
+  "mediamtx_config": "rtsp/mediamtx.yml"
+}
+```
+
+The bundled `rtsp/mediamtx.yml` forces RTSP over **TCP** (`rtspTransports: [tcp]`), which is more reliable through routers and firewalls than UDP. If you prefer UDP on your local network, edit `rtsp/mediamtx.yml` and change it to `[udp, tcp]` or `[udp]`.
+
+Adjust `width`, `height`, and `fps` to match your board’s CPU. Lower resolution and FPS reduce load.
+
+### 3. Restart the service
+
+```bash
+sudo systemctl restart cheapsecurity@$(whoami).service
+```
+
+### 4. Watch the stream
+
+The stream URL is:
+
+```text
+rtsp://<odroid-ip>:8554/live
+```
+
+Examples:
+
+- **VLC** → Media → Open Network Stream → paste `rtsp://<odroid-ip>:8554/live`
+- **ffplay**:
+  ```bash
+  ffplay -rtsp_transport tcp rtsp://<odroid-ip>:8554/live
+  ```
+  > The `-rtsp_transport tcp` flag avoids UDP RTP issues through routers/firewalls. VLC has a similar `--rtsp-tcp` option.
+- **Android IP Camera apps** — add a camera with the RTSP URL above.
+- **NVR / Home Assistant** — use the same RTSP URL as the camera source.
+
+### 5. Check that it is working
+
+Look for MediaMTX and FFmpeg in the logs:
+
+```bash
+sudo journalctl -u cheapsecurity@$(whoami).service -f
+```
+
+You should see messages like:
+
+```text
+RTSPPublisher: MediaMTX ready on port 8554
+RTSPPublisher: FFmpeg publisher started
+```
+
+### Performance and troubleshooting
+
+- RTSP is republished from the HTTP MJPEG stream, so it uses extra CPU. On the Odroid XU4, **1280×720 @ 15fps** is a good starting point.
+- When HTTP Basic Auth is enabled, FFmpeg is allowed to read `/video_feed` from `localhost` without credentials, so RTSP still works.
+- Make sure port `8554/tcp` is open in your firewall if you view it from another machine.
+- If the RTSP stream does not appear, verify:
+  - MediaMTX binary exists and is executable.
+  - `rtsp/mediamtx.yml` exists.
+  - FFmpeg is installed.
+  - The dashboard stream at `http://<odroid-ip>:5000/video_feed` works.
+- If the client connects but shows a black screen / no video, the player probably chose UDP and the RTP packets are being blocked. Force TCP on the client (`-rtsp_transport tcp` in ffplay, `--rtsp-tcp` in VLC) or keep `rtspTransports: [tcp]` in `rtsp/mediamtx.yml` and restart the service.
 
 ## Production deployment
 
