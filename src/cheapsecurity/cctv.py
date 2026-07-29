@@ -149,11 +149,14 @@ class CCTVSystem:
         self._manual_record_until: float = 0.0
         self._manual_record_chat_id: str | None = None
         self._manual_recording_active: bool = False
+        self._manual_finalize_done = threading.Event()
 
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._cap_lock = threading.Lock()
         self._config_lock = threading.Lock()
+        self._telegram_store_lock = threading.Lock()
+        self._telegram_store_path: Path = self.record_dir / ".telegram_messages.json"
         self._current_frame: bytes | None = None
         self._jpeg_quality = 75
         self._buffer_jpeg_quality = 85  # lower memory use for pre-motion buffer
@@ -571,6 +574,7 @@ class CCTVSystem:
                 frames_written = self._frames_written
                 writer_fps = self._writer_fps
                 path = self.recording_path
+                self._manual_finalize_done.clear()
                 threading.Thread(
                     target=self._finalize_manual_recording,
                     args=(path, manual_chat_id, actual_duration, frames_written, writer_fps),
@@ -623,16 +627,24 @@ class CCTVSystem:
 
         fixed_path = path.with_suffix(".fixed" + path.suffix)
         try:
+            # Re-encode with a filter that forces evenly spaced timestamps at the
+            # calculated frame rate. A plain ``-r`` with ``-c:v copy`` can drop
+            # or duplicate frames depending on the input/output rate ratio, so
+            # we rewrite timestamps while keeping the same MJPEG codec.
             subprocess.run(
                 [
                     "ffmpeg",
                     "-y",
                     "-i",
                     str(path),
+                    "-vf",
+                    f"setpts=N/{correct_fps}/TB",
                     "-r",
                     str(correct_fps),
                     "-c:v",
-                    "copy",
+                    "mjpeg",
+                    "-q:v",
+                    "3",
                     str(fixed_path),
                 ],
                 check=True,
@@ -662,13 +674,16 @@ class CCTVSystem:
         writer_fps: float,
     ) -> None:
         """Fix duration and upload a manual recording without blocking the main loop."""
-        self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
-        size = path.stat().st_size
-        logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
         try:
-            self._send_telegram_video(path, chat_id=chat_id)
-        except Exception as e:
-            logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+            size = path.stat().st_size
+            logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+            try:
+                self._send_telegram_video(path, chat_id=chat_id)
+            except Exception as e:
+                logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
+        finally:
+            self._manual_finalize_done.set()
 
     # ------------------------------------------------------------------
     # Streaming
@@ -796,59 +811,252 @@ class CCTVSystem:
         return text.replace(self.telegram_token, "<TOKEN>")
 
     def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
-        try:
-            target_chat = chat_id or self.telegram_chat_id
-            if not target_chat:
+        target_chat = chat_id or self.telegram_chat_id
+        if not target_chat:
+            return
+
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
+
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                with open(video_path, "rb") as f:
+                    files = {"video": (video_path.name, f, "video/avi")}
+                    data = {"chat_id": target_chat, "caption": caption}
+                    response = requests.post(url, data=data, files=files, timeout=120)
+
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} sending video (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+
+                if response.status_code != 200:
+                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                result = response.json().get("result", {})
+                raw_message_id = result.get("message_id")
+                message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
+                if message_id is not None:
+                    self._store_telegram_message(
+                        message_id=message_id,
+                        chat_id=target_chat,
+                        msg_type="video",
+                        caption=video_path.name,
+                    )
+                logger.info(f"Telegram video sent: {video_path.name}")
                 return
-
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
-
-            with open(video_path, "rb") as f:
-                files = {"video": (video_path.name, f, "video/avi")}
-                data = {"chat_id": target_chat, "caption": caption}
-                response = requests.post(url, data=data, files=files, timeout=120)
-
-            if response.status_code != 200:
-                raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
-            logger.info(f"Telegram video sent: {video_path.name}")
-        except Exception as e:
-            logger.error(f"Failed to send Telegram video: {self._redact_token(str(e))}")
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram video send failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to send Telegram video: {self._redact_token(str(e))}")
+                return
+        logger.error(f"Failed to send Telegram video after {max_retries} attempts")
 
     def _send_telegram_photo(self, image_bytes: bytes, chat_id: str, caption: str = "") -> None:
-        try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
-            files = {"photo": ("snapshot.jpg", image_bytes, "image/jpeg")}
-            data = {"chat_id": chat_id, "caption": caption}
-            response = requests.post(url, data=data, files=files, timeout=60)
-            if response.status_code != 200:
-                raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
-            logger.info(f"Telegram snapshot sent to {chat_id}")
-        except Exception as e:
-            logger.error(f"Failed to send Telegram snapshot: {self._redact_token(str(e))}")
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
+        files = {"photo": ("snapshot.jpg", image_bytes, "image/jpeg")}
+        data = {"chat_id": chat_id, "caption": caption}
 
-    def _send_telegram_message(self, text: str, chat_id: str) -> None:
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(url, data=data, files=files, timeout=60)
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} sending photo (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+                if response.status_code != 200:
+                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                result = response.json().get("result", {})
+                raw_message_id = result.get("message_id")
+                message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
+                if message_id is not None:
+                    self._store_telegram_message(
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        msg_type="photo",
+                        caption=caption[:200],
+                    )
+                logger.info(f"Telegram snapshot sent to {chat_id}")
+                return
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram photo send failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to send Telegram snapshot: {self._redact_token(str(e))}")
+                return
+        logger.error(f"Failed to send Telegram snapshot after {max_retries} attempts")
+
+    def _send_telegram_message(self, text: str, chat_id: str) -> int | None:
+        """Send a text message. Return the message_id on success, None otherwise."""
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+        data = {"chat_id": chat_id, "text": text}
+
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(url, data=data, timeout=30)
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} sending message (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+                if response.status_code != 200:
+                    logger.error(f"Telegram message error {response.status_code}: {response.text}")
+                    return None
+                result = response.json().get("result", {})
+                raw_message_id = result.get("message_id")
+                message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
+                if message_id is not None:
+                    self._store_telegram_message(
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        msg_type="text",
+                        caption=text[:200],
+                    )
+                return message_id
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram message send failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to send Telegram message: {self._redact_token(str(e))}")
+                return None
+        logger.error(f"Failed to send Telegram message after {max_retries} attempts")
+        return None
+
+    def _store_telegram_message(
+        self,
+        message_id: int,
+        chat_id: str,
+        msg_type: str,
+        caption: str = "",
+        max_entries: int = 100,
+    ) -> None:
+        """Persist a sent Telegram message ID so it can be deleted later."""
         try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            data = {"chat_id": chat_id, "text": text}
-            response = requests.post(url, data=data, timeout=30)
-            if response.status_code != 200:
-                logger.error(f"Telegram message error {response.status_code}: {response.text}")
+            entry = {
+                "message_id": message_id,
+                "chat_id": chat_id,
+                "type": msg_type,
+                "caption": caption,
+                "timestamp": datetime.now().isoformat(),
+            }
+            with self._telegram_store_lock:
+                messages = self._load_telegram_messages()
+                messages.append(entry)
+                # Keep only the most recent entries to avoid unbounded growth.
+                if len(messages) > max_entries:
+                    messages = messages[-max_entries:]
+                temp_path = self._telegram_store_path.with_suffix(".tmp")
+                with open(temp_path, "w") as f:
+                    json.dump(messages, f, indent=2)
+                temp_path.replace(self._telegram_store_path)
         except Exception as e:
-            logger.error(f"Failed to send Telegram message: {self._redact_token(str(e))}")
+            logger.error(f"Failed to store Telegram message ID: {self._redact_token(str(e))}")
+
+    def _load_telegram_messages(self) -> list[dict]:
+        """Load persisted Telegram message IDs."""
+        if not self._telegram_store_path.exists():
+            return []
+        try:
+            with open(self._telegram_store_path) as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            logger.error(f"Failed to load Telegram message store: {self._redact_token(str(e))}")
+        return []
+
+    def _delete_telegram_message(self, message_id: int, chat_id: str) -> bool:
+        """Delete a message from Telegram and the local store. Return True on success."""
+        url = f"https://api.telegram.org/bot{self.telegram_token}/deleteMessage"
+        data = {"chat_id": chat_id, "message_id": message_id}
+
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(url, data=data, timeout=30)
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} deleting message (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+                if response.status_code != 200:
+                    logger.error(
+                        f"Telegram deleteMessage error {response.status_code}: {response.text}"
+                    )
+                    return False
+                with self._telegram_store_lock:
+                    messages = self._load_telegram_messages()
+                    messages = [m for m in messages if m.get("message_id") != message_id]
+                    temp_path = self._telegram_store_path.with_suffix(".tmp")
+                    with open(temp_path, "w") as f:
+                        json.dump(messages, f, indent=2)
+                    temp_path.replace(self._telegram_store_path)
+                logger.info(f"Telegram message {message_id} deleted")
+                return True
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram delete failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to delete Telegram message: {self._redact_token(str(e))}")
+                return False
+        logger.error(f"Failed to delete Telegram message after {max_retries} attempts")
+        return False
 
     def _telegram_poll_loop(self) -> None:
         logger.info("Starting Telegram command polling...")
         while self.running and self.telegram_poll_commands:
-            if not self.telegram_enabled:
-                time.sleep(5)
-                continue
+            # Command polling works even when automatic Telegram uploads are disabled,
+            # so the user can still use /snapshot, /video, and toggle settings.
             try:
                 url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
                 params = {"offset": self._telegram_offset + 1, "limit": 10}
                 response = requests.get(url, params=params, timeout=30)
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram getUpdates returned {response.status_code}, retrying..."
+                    )
+                    time.sleep(5)
+                    continue
                 if response.status_code != 200:
+                    logger.error(f"Telegram getUpdates error {response.status_code}: {response.text}")
                     time.sleep(5)
                     continue
 
@@ -860,6 +1068,12 @@ class CCTVSystem:
                 for update in data.get("result", []):
                     self._telegram_offset = max(self._telegram_offset, update["update_id"])
                     self._handle_telegram_update(update)
+            except requests.exceptions.Timeout:
+                # Long-polling timeouts are normal on a quiet chat.
+                logger.debug("Telegram getUpdates timed out, retrying...")
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"Telegram poll connection error: {self._redact_token(str(e))}")
+                time.sleep(5)
             except Exception as e:
                 logger.error(f"Telegram poll error: {self._redact_token(str(e))}")
             time.sleep(2)
@@ -889,16 +1103,143 @@ class CCTVSystem:
                 with contextlib.suppress(ValueError):
                     seconds = int(cmd[1])
             self._handle_telegram_video(seconds, chat_id)
+        elif cmd[0] == "/sent":
+            self._handle_telegram_sent(chat_id)
+        elif cmd[0] == "/delete":
+            self._handle_telegram_delete(cmd, chat_id)
+        elif cmd[0] == "/delete_range":
+            self._handle_telegram_delete_range(cmd, chat_id)
+        elif cmd[0] == "/id":
+            reply = message.get("reply_to_message")
+            if reply:
+                self._send_telegram_message(f"Reply message ID: {reply['message_id']}", chat_id)
+            else:
+                self._send_telegram_message(
+                    "Reply to a message with /id to get its Telegram message ID.", chat_id
+                )
+        elif cmd[0] == "/telegram_on":
+            self.set_telegram_enabled(True)
+            self._send_telegram_message("Telegram auto-uploads enabled.", chat_id)
+        elif cmd[0] == "/telegram_off":
+            self.set_telegram_enabled(False)
+            self._send_telegram_message("Telegram auto-uploads disabled.", chat_id)
+        elif cmd[0] == "/email_on":
+            self.set_notifications_enabled(True)
+            self._send_telegram_message("Email notifications enabled.", chat_id)
+        elif cmd[0] == "/email_off":
+            self.set_notifications_enabled(False)
+            self._send_telegram_message("Email notifications disabled.", chat_id)
         elif cmd[0] == "/help":
             self._send_telegram_message(
                 "Available commands:\n"
                 "/snapshot - get current picture\n"
                 "/video <seconds> - record and send a video (1-60s, default 10)\n"
+                "/sent - list recent bot messages that can be deleted\n"
+                "/delete <message_id> - delete a bot message by ID\n"
+                "/delete last - delete the most recent bot message\n"
+                "/delete_range <min_id> <max_id> - delete all bot messages with IDs in the range\n"
+                "/id - reply to any bot message with this to see its message ID\n"
+                "/telegram_on /telegram_off - enable or disable auto Telegram uploads\n"
+                "/email_on /email_off - enable or disable email notifications\n"
                 "/help - show this help",
                 chat_id,
             )
         else:
             self._send_telegram_message("Unknown command. Use /help.", chat_id)
+
+    def _handle_telegram_sent(self, chat_id: str) -> None:
+        try:
+            messages = self._load_telegram_messages()
+            if not messages:
+                self._send_telegram_message("No tracked bot messages.", chat_id)
+                return
+            lines = ["Recent bot messages (newest last):"]
+            for entry in messages[-20:]:
+                ts = entry.get("timestamp", "unknown")[:19].replace("T", " ")
+                lines.append(
+                    f"{entry['message_id']} - {entry['type']} - {ts}\n  {entry.get('caption', '')}"
+                )
+            self._send_telegram_message("\n".join(lines), chat_id)
+        except Exception as e:
+            logger.error(f"Failed to list Telegram messages: {self._redact_token(str(e))}")
+            self._send_telegram_message("Failed to list messages.", chat_id)
+
+    def _handle_telegram_delete(self, cmd: list[str], chat_id: str) -> None:
+        try:
+            if len(cmd) < 2:
+                self._send_telegram_message("Usage: /delete <message_id> or /delete last", chat_id)
+                return
+
+            if cmd[1] == "last":
+                messages = self._load_telegram_messages()
+                if not messages:
+                    self._send_telegram_message("No tracked messages to delete.", chat_id)
+                    return
+                message_id = messages[-1]["message_id"]
+            else:
+                try:
+                    message_id = int(cmd[1])
+                except ValueError:
+                    self._send_telegram_message("Invalid message ID.", chat_id)
+                    return
+
+            if self._delete_telegram_message(message_id, chat_id):
+                self._send_telegram_message(f"Message {message_id} deleted.", chat_id)
+            else:
+                self._send_telegram_message(
+                    f"Could not delete message {message_id}. It may be too old or already removed.",
+                    chat_id,
+                )
+        except Exception as e:
+            logger.error(f"Failed to handle delete command: {self._redact_token(str(e))}")
+            self._send_telegram_message("Failed to delete message.", chat_id)
+
+    def _handle_telegram_delete_range(self, cmd: list[str], chat_id: str) -> None:
+        try:
+            if len(cmd) != 3:
+                self._send_telegram_message(
+                    "Usage: /delete_range <min_id> <max_id>", chat_id
+                )
+                return
+
+            try:
+                min_id = int(cmd[1])
+                max_id = int(cmd[2])
+            except ValueError:
+                self._send_telegram_message("Both IDs must be integers.", chat_id)
+                return
+
+            if min_id > max_id:
+                self._send_telegram_message("min_id must be <= max_id.", chat_id)
+                return
+
+            # Attempt to delete every message ID in the requested range, not
+            # only the IDs stored locally. Telegram will return an error for
+            # IDs that are too old, already deleted, or not sent by this bot.
+            ids_to_delete = list(range(min_id, max_id + 1))
+
+            deleted = 0
+            failed = 0
+            for message_id in ids_to_delete:
+                if self._delete_telegram_message(message_id, chat_id):
+                    deleted += 1
+                else:
+                    failed += 1
+
+            if deleted == 0:
+                self._send_telegram_message(
+                    f"Could not delete any messages in range {min_id}-{max_id} "
+                    "(they may be too old, already removed, or not sent by this bot).",
+                    chat_id,
+                )
+            else:
+                self._send_telegram_message(
+                    f"Deleted {deleted} messages in range {min_id}-{max_id} ({failed} failed).",
+                    chat_id,
+                )
+        except Exception as e:
+            logger.error(f"Failed to handle delete_range command: {self._redact_token(str(e))}")
+            self._send_telegram_message("Failed to delete message range.", chat_id)
 
     def _handle_telegram_snapshot(self, chat_id: str) -> None:
         try:

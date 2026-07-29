@@ -59,3 +59,5 @@ class TestSwagger:
         assert "post" in paths.get("/api/settings/night_mode", {})
         assert "post" in paths.get("/api/snapshot", {})
         assert "post" in paths.get("/api/video", {})
+        assert "post" in paths.get("/api/telegram/delete", {})
+        assert "post" in paths.get("/api/telegram/delete_range", {})

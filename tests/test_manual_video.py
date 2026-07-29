@@ -86,7 +86,13 @@ def _build_config(record_dir: Path) -> dict:
 
 
 def _get_video_duration(path: Path) -> float:
-    """Return video duration in seconds using ffprobe or OpenCV."""
+    """Return video duration in seconds using ffprobe (stream) or OpenCV.
+
+    The AVI container duration reported by ``format=duration`` can be
+    unreliable after the post-recording FPS fix, so we prefer the video
+    stream duration and fall back to frame-count / frame-rate.
+    """
+    import fractions
     import shutil
     import subprocess
 
@@ -97,19 +103,34 @@ def _get_video_duration(path: Path) -> float:
                     "ffprobe",
                     "-v",
                     "error",
+                    "-select_streams",
+                    "v:0",
                     "-show_entries",
-                    "format=duration",
+                    "stream=duration,r_frame_rate,nb_frames",
                     "-of",
-                    "default=noprint_wrappers=1:nokey=1",
+                    "default=noprint_wrappers=1",
                     str(path),
                 ],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            duration = float(result.stdout.strip())
-            if duration > 0:
-                return duration
+            fields: dict[str, str] = {}
+            for line in result.stdout.strip().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    fields[key.strip()] = value.strip()
+
+            if "duration" in fields:
+                duration = float(fields["duration"])
+                if duration > 0:
+                    return duration
+
+            if "r_frame_rate" in fields and "nb_frames" in fields:
+                rate = fractions.Fraction(fields["r_frame_rate"])
+                frames = int(fields["nb_frames"])
+                if rate > 0 and frames > 0:
+                    return float(frames / rate)
         except Exception:
             pass
 
@@ -151,6 +172,7 @@ class TestManualVideo:
 
             elapsed = time.time() - recording_started_at
             system.stop()
+            system._manual_finalize_done.wait(timeout=15.0)
 
             recordings = list(record_dir.glob("*.avi")) + list(record_dir.glob("*.mp4"))
             assert recordings, "No recording created"

@@ -447,6 +447,127 @@ def api_send_telegram_recordings() -> RouteReturn:
     return jsonify({"results": results})
 
 
+@app.route("/api/telegram/delete", methods=["POST"])
+def api_delete_telegram_message() -> RouteReturn:
+    """Delete a previously sent Telegram message by message_id.
+    ---
+    tags:
+      - telegram
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            message_id:
+              type: integer
+              example: 12345
+    responses:
+      200:
+        description: Deletion result
+        examples:
+          application/json:
+            deleted: true
+            message_id: 12345
+      400:
+        description: Missing or invalid message_id
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    message_id = data.get("message_id")
+    if message_id is None:
+        return jsonify({"error": "message_id is required"}), 400
+    try:
+        message_id = int(message_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "message_id must be an integer"}), 400
+
+    chat_id = cctv.cfg.get("telegram", {}).get("chat_id") if cctv.telegram_enabled else None
+    if not chat_id:
+        return jsonify({"error": "Telegram not configured"}), 400
+
+    deleted = cctv._delete_telegram_message(message_id, chat_id)
+    return jsonify({"deleted": deleted, "message_id": message_id})
+
+
+@app.route("/api/telegram/delete_range", methods=["POST"])
+def api_delete_telegram_range() -> RouteReturn:
+    """Delete Telegram messages whose IDs fall in a range.
+
+    Every ID in [min_id, max_id] is sent to Telegram's deleteMessage API,
+    regardless of whether it is stored in the local tracking file.
+    ---
+    tags:
+      - telegram
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            min_id:
+              type: integer
+              example: 12340
+            max_id:
+              type: integer
+              example: 12350
+    responses:
+      200:
+        description: Range deletion result
+        examples:
+          application/json:
+            deleted: 5
+            failed: 6
+            range: [12340, 12350]
+      400:
+        description: Missing/invalid range, min_id > max_id, or Telegram not configured
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    min_id = data.get("min_id")
+    max_id = data.get("max_id")
+    if min_id is None or max_id is None:
+        return jsonify({"error": "min_id and max_id are required"}), 400
+    try:
+        min_id = int(min_id)
+        max_id = int(max_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "min_id and max_id must be integers"}), 400
+
+    if min_id > max_id:
+        return jsonify({"error": "min_id must be <= max_id"}), 400
+
+    chat_id = cctv.cfg.get("telegram", {}).get("chat_id") if cctv.telegram_enabled else None
+    if not chat_id:
+        return jsonify({"error": "Telegram not configured"}), 400
+
+    ids_to_delete = list(range(min_id, max_id + 1))
+    deleted = 0
+    failed = 0
+    for message_id in ids_to_delete:
+        if cctv._delete_telegram_message(message_id, chat_id):
+            deleted += 1
+        else:
+            failed += 1
+    return jsonify({"deleted": deleted, "failed": failed, "range": [min_id, max_id]})
+
+
 @app.route("/api/settings")
 def api_settings() -> RouteReturn:
     """Get current toggleable settings.

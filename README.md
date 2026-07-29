@@ -21,7 +21,7 @@ Key Features
 - **Email alerts** with a snapshot picture when motion starts
 - **Telegram integration**:
   - Automatic video upload after motion is recorded
-  - Bot commands: `/snapshot`, `/video <seconds>`, `/help`
+  - Bot commands: `/snapshot`, `/video <seconds>`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
 - **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
 - **Interactive Swagger UI** at `/api/` for the REST API
@@ -205,11 +205,20 @@ From your configured chat, send:
 
 - `/snapshot` — receive the current camera picture
 - `/video 10` — record and send a 10-second video (1–60 seconds, default 10)
+- `/sent` — list recent bot messages that can be deleted, with their message IDs
+- `/delete <message_id>` — delete a bot message from the chat
+- `/delete last` — delete the most recent bot message
+- `/delete_range <min_id> <max_id>` — delete tracked messages in a range (max 100)
+- `/id` — reply to any bot message with this command to see its message ID
+- `/telegram_on` / `/telegram_off` — enable or disable automatic Telegram uploads
+- `/email_on` / `/email_off` — enable or disable email notifications
 - `/help` — list commands
 
 The bot only responds to your configured `chat_id`.
 
 **Motion has priority:** if the system is already recording because motion was detected, a `/video` request will not interrupt it. The bot will reply that a motion video is in progress and will be uploaded automatically.
+
+**Deleting messages and cloud cache:** Telegram bots cannot purge Telegram’s master cloud storage directly. When you delete a message, the media file becomes orphaned and is eventually garbage-collected by Telegram. Only messages sent by this bot after this feature is enabled are tracked; older messages do not have stored IDs and cannot be deleted this way.
 
 ## Email alerts
 
@@ -312,6 +321,8 @@ curl -u admin:changeme \
 - `POST /api/recordings/delete` — delete selected recordings
 - `POST /api/recordings/download` — download selected recordings as ZIP
 - `POST /api/recordings/telegram` — send selected recordings to Telegram
+- `POST /api/telegram/delete` — delete a previously sent Telegram message by ID
+- `POST /api/telegram/delete_range` — delete tracked Telegram messages in an ID range
 - `POST /api/settings/{telegram,night_mode,notifications,auth}` — toggle features
 - `POST /api/snapshot` — capture and download a JPEG snapshot
 - `POST /api/video` — start a manual recording (default 10s, max 60s)

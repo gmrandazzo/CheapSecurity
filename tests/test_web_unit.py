@@ -206,6 +206,71 @@ class TestVideo:
         assert response.status_code == 400
 
 
+class TestTelegramDelete:
+    def test_telegram_delete_missing_message_id(self, client):
+        test_client, _ = client
+        response = test_client.post(
+            "/api/telegram/delete",
+            json={},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 400
+
+    def test_telegram_delete_not_configured(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.telegram_enabled = False
+        response = test_client.post(
+            "/api/telegram/delete",
+            json={"message_id": 12345},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 400
+
+    def test_telegram_delete_success(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.telegram_enabled = True
+        fake_cctv.cfg["telegram"] = {"chat_id": "12345"}
+        fake_cctv._delete_telegram_message.return_value = True
+        response = test_client.post(
+            "/api/telegram/delete",
+            json={"message_id": 12345},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["deleted"] is True
+        assert data["message_id"] == 12345
+        fake_cctv._delete_telegram_message.assert_called_once_with(12345, "12345")
+
+
+class TestTelegramDeleteRange:
+    def test_delete_range_success(self, client):
+        test_client, fake_cctv = client
+        fake_cctv.telegram_enabled = True
+        fake_cctv.cfg["telegram"] = {"chat_id": "12345"}
+        fake_cctv._delete_telegram_message.return_value = True
+        response = test_client.post(
+            "/api/telegram/delete_range",
+            json={"min_id": 100, "max_id": 103},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data["deleted"] == 4
+        assert data["failed"] == 0
+        assert data["range"] == [100, 103]
+        assert fake_cctv._delete_telegram_message.call_count == 4
+
+    def test_delete_range_rejects_invalid_range(self, client):
+        test_client, _ = client
+        response = test_client.post(
+            "/api/telegram/delete_range",
+            json={"min_id": 200, "max_id": 100},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == 400
+
+
 class TestCSRF:
     def test_post_rejects_missing_csrf_header(self, client):
         test_client, _ = client

@@ -182,3 +182,210 @@ class TestTokenRedaction:
         system.telegram_token = "secret123"
         assert system._redact_token("error secret123") == "error <TOKEN>"
         assert system._redact_token("no token") == "no token"
+
+
+class TestTelegramMessageStore:
+    def test_store_telegram_message_persists_entry(self, system):
+        system._store_telegram_message(
+            message_id=12345,
+            chat_id="42",
+            msg_type="video",
+            caption="test video",
+        )
+        messages = system._load_telegram_messages()
+        assert len(messages) == 1
+        assert messages[0]["message_id"] == 12345
+        assert messages[0]["chat_id"] == "42"
+        assert messages[0]["type"] == "video"
+        assert messages[0]["caption"] == "test video"
+
+    def test_store_limits_entries(self, system):
+        for i in range(105):
+            system._store_telegram_message(i, "42", "text", max_entries=100)
+        messages = system._load_telegram_messages()
+        assert len(messages) == 100
+        assert messages[0]["message_id"] == 5
+        assert messages[-1]["message_id"] == 104
+
+    def test_delete_telegram_message_calls_api_and_removes_entry(self, system, monkeypatch):
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True, "result": True}
+
+        def fake_post(url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        system.telegram_token = "token"
+        system.telegram_chat_id = "42"
+        system._store_telegram_message(999, "42", "photo")
+
+        assert system._delete_telegram_message(999, "42") is True
+        assert system._load_telegram_messages() == []
+        assert any("deleteMessage" in call[0] for call in calls)
+        delete_call = [c for c in calls if "deleteMessage" in c[0]][0]
+        assert delete_call[1]["data"] == {"chat_id": "42", "message_id": 999}
+
+    def test_sent_command_lists_messages(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._store_telegram_message(100, "42", "video", "motion_1.avi")
+        system._store_telegram_message(101, "42", "photo", "snapshot")
+        system._handle_telegram_sent("42")
+        assert len(sent) == 1
+        assert "100" in sent[0]
+        assert "101" in sent[0]
+        assert "video" in sent[0]
+        assert "photo" in sent[0]
+
+    def test_delete_command_deletes_by_id(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        deleted = []
+        monkeypatch.setattr(
+            system, "_delete_telegram_message",
+            lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
+        )
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/delete 12345", "chat": {"id": 42}}})
+        assert deleted == [(12345, "42")]
+        assert any("12345 deleted" in msg for msg in sent)
+
+    def test_delete_last_command_deletes_most_recent(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        deleted = []
+        monkeypatch.setattr(
+            system, "_delete_telegram_message",
+            lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
+        )
+        system._store_telegram_message(100, "42", "video")
+        system._store_telegram_message(101, "42", "photo")
+        system._handle_telegram_update({"message": {"text": "/delete last", "chat": {"id": 42}}})
+        assert deleted == [(101, "42")]
+
+    def test_delete_command_rejects_invalid_id(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/delete abc", "chat": {"id": 42}}})
+        assert any("Invalid message ID" in msg for msg in sent)
+
+    def test_id_command_returns_reply_message_id(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update(
+            {
+                "message": {
+                    "text": "/id",
+                    "chat": {"id": 42},
+                    "reply_to_message": {"message_id": 98765},
+                }
+            }
+        )
+        assert any("98765" in msg for msg in sent)
+
+    def test_id_command_without_reply_shows_usage(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/id", "chat": {"id": 42}}})
+        assert any("Reply to a message" in msg for msg in sent)
+
+    def test_telegram_on_command_enables_uploads(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        system.telegram_enabled = False
+        system.cfg["telegram"] = {"enabled": False}
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/telegram_on", "chat": {"id": 42}}})
+        assert system.telegram_enabled is True
+        assert system.cfg["telegram"]["enabled"] is True
+        assert any("Telegram auto-uploads enabled" in msg for msg in sent)
+
+    def test_telegram_off_command_disables_uploads(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        system.telegram_enabled = True
+        system.cfg["telegram"] = {"enabled": True}
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/telegram_off", "chat": {"id": 42}}})
+        assert system.telegram_enabled is False
+        assert system.cfg["telegram"]["enabled"] is False
+        assert any("Telegram auto-uploads disabled" in msg for msg in sent)
+
+    def test_email_on_command_enables_notifications(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        system.notifications_enabled = False
+        system.cfg["notifications"] = {"enabled": False}
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/email_on", "chat": {"id": 42}}})
+        assert system.notifications_enabled is True
+        assert system.cfg["notifications"]["enabled"] is True
+        assert any("Email notifications enabled" in msg for msg in sent)
+
+    def test_email_off_command_disables_notifications(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        system.notifications_enabled = True
+        system.cfg["notifications"] = {"enabled": True}
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update({"message": {"text": "/email_off", "chat": {"id": 42}}})
+        assert system.notifications_enabled is False
+        assert system.cfg["notifications"]["enabled"] is False
+        assert any("Email notifications disabled" in msg for msg in sent)
+
+    def test_delete_range_command_deletes_all_ids_in_range(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        deleted = []
+        monkeypatch.setattr(
+            system, "_delete_telegram_message",
+            lambda msg_id, chat_id: deleted.append(msg_id) or True,
+        )
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._store_telegram_message(100, "42", "video")
+        system._store_telegram_message(105, "42", "video")
+        system._handle_telegram_update(
+            {"message": {"text": "/delete_range 100 103", "chat": {"id": 42}}}
+        )
+        assert sorted(deleted) == [100, 101, 102, 103]
+        assert any("Deleted 4 messages in range 100-103" in msg for msg in sent)
+
+    def test_delete_range_command_rejects_invalid_range(self, system, monkeypatch):
+        system.telegram_chat_id = "42"
+        sent = []
+        monkeypatch.setattr(
+            system, "_send_telegram_message", lambda text, chat_id: sent.append(text)
+        )
+        system._handle_telegram_update(
+            {"message": {"text": "/delete_range 200 100", "chat": {"id": 42}}}
+        )
+        assert any("min_id must be <= max_id" in msg for msg in sent)
