@@ -360,11 +360,8 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    # Create temporary file on disk to avoid RAM exhaustion OOM crashes.
-    # Place it in the recordings directory so large selections do not fill /tmp.
-    temp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir))
-    temp_zip_path = temp_zip.name
-    temp_zip.close()
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir)) as temp_zip:
+        temp_zip_path = temp_zip.name
 
     @after_this_request
     def remove_file(response: Response) -> Response:

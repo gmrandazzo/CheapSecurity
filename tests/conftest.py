@@ -3,8 +3,9 @@
 import json
 
 import pytest
-from cheapsecurity.cctv import CCTVSystem
 from helpers import FakeCapture
+
+from cheapsecurity.cctv import CCTVSystem
 
 
 @pytest.fixture
