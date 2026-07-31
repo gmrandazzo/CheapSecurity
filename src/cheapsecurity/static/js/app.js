@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-let currentSettings = { night_mode: false, notifications_enabled: false, telegram_enabled: false, auth_enabled: false };
+let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, auth_enabled: false };
 
 async function loadStatus() {
   try {
@@ -42,7 +42,7 @@ async function loadStatus() {
       badge.classList.add('ok');
     }
 
-    updateToggles(data.night_mode, data.notifications_enabled, data.telegram_enabled, data.auth_enabled);
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.auth_enabled);
   } catch (e) {
     document.getElementById('status-badge').textContent = 'Offline';
   }
@@ -161,31 +161,62 @@ async function loadSettings() {
   try {
     const res = await fetch('/api/settings');
     const data = await res.json();
-    updateToggles(data.night_mode, data.notifications_enabled, data.telegram_enabled, data.auth_enabled);
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.auth_enabled);
   } catch (e) {
     console.error('Failed to load settings', e);
   }
 }
 
-function updateToggles(night, notifications, telegram, auth) {
-  currentSettings = { night_mode: night, notifications_enabled: notifications, telegram_enabled: telegram, auth_enabled: auth };
+function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, auth) {
+  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, auth_enabled: auth };
   document.getElementById('night-toggle').checked = night;
+  document.getElementById('night-strength').value = nightStrength || 'normal';
   document.getElementById('notif-toggle').checked = notifications;
   document.getElementById('telegram-toggle').checked = telegram;
   document.getElementById('auth-toggle').checked = auth;
+  updateNightCameraStatus();
+}
+
+function updateNightCameraStatus() {
+  const statusEl = document.getElementById('night-camera-status');
+  const labelEl = document.getElementById('night-camera-label');
+  if (!statusEl || !labelEl) return;
+  if (currentSettings.night_device_configured) {
+    statusEl.style.display = 'block';
+    labelEl.textContent = currentSettings.night_device_active ? 'IR/night camera' : 'Day camera';
+  } else {
+    statusEl.style.display = 'none';
+  }
 }
 
 async function setNightMode(enabled) {
   try {
+    const strength = document.getElementById('night-strength').value;
     const res = await fetch('/api/settings/night_mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ enabled })
+      body: JSON.stringify({ enabled, strength })
     });
     const data = await res.json();
-    updateToggles(data.night_mode, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.auth_enabled);
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.auth_enabled);
   } catch (e) {
     alert('Failed to update night mode');
+    loadSettings();
+  }
+}
+
+async function setNightModeStrength(strength) {
+  try {
+    const enabled = document.getElementById('night-toggle').checked;
+    const res = await fetch('/api/settings/night_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ enabled, strength })
+    });
+    const data = await res.json();
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.auth_enabled);
+  } catch (e) {
+    alert('Failed to update night mode strength');
     loadSettings();
   }
 }
@@ -198,7 +229,7 @@ async function setTelegram(enabled) {
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
-    updateToggles(currentSettings.night_mode, currentSettings.notifications_enabled, data.telegram_enabled, currentSettings.auth_enabled);
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, data.telegram_enabled, currentSettings.auth_enabled);
   } catch (e) {
     alert('Failed to update Telegram setting');
     loadSettings();
@@ -213,7 +244,7 @@ async function setNotifications(enabled) {
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
-    updateToggles(currentSettings.night_mode, data.notifications_enabled, currentSettings.telegram_enabled, currentSettings.auth_enabled);
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, data.notifications_enabled, currentSettings.telegram_enabled, currentSettings.auth_enabled);
   } catch (e) {
     alert('Failed to update notifications setting');
     loadSettings();
@@ -228,7 +259,7 @@ async function setAuth(enabled) {
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
-    updateToggles(currentSettings.night_mode, currentSettings.notifications_enabled, currentSettings.telegram_enabled, data.auth_enabled);
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, data.auth_enabled);
   } catch (e) {
     alert('Failed to update auth setting');
     loadSettings();

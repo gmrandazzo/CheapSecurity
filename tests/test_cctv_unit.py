@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from cheapsecurity.cctv import CCTVSystem
 from helpers import FakeCapture
@@ -44,6 +45,73 @@ class TestNightMode:
         result = system._apply_night_mode(frame)
         assert result.shape == frame.shape
         assert result.dtype == frame.dtype
+
+
+class TestNightCameraSwitching:
+    def test_single_camera_mode_keeps_day_device(self, system):
+        system.night_device = None
+        system._open_capture()
+        system.set_night_mode(True)
+        assert system._active_device == system.device
+        assert system.cap is not None
+        assert system.cap.get(cv2.CAP_PROP_GAIN) == 255
+
+    def test_dual_camera_switch_opens_night_device(self, system, monkeypatch):
+        opened = []
+
+        def factory(device, *args, **kwargs):
+            opened.append(device)
+            if device == 0:
+                return FakeCapture(640, 480, 15)
+            return FakeCapture(320, 240, 10)
+
+        monkeypatch.setattr("cv2.VideoCapture", factory)
+        system.night_device = 1
+        system.night_device_width = 320
+        system.night_device_height = 240
+        system.night_device_fps = 10
+        system.set_night_mode(True)
+        assert system._active_device == 1
+        assert 1 in opened
+
+    def test_night_camera_failure_falls_back_to_day(self, system, monkeypatch):
+        opened = []
+
+        class FailCapture:
+            def isOpened(self):  # noqa: N802
+                return False
+
+            def release(self):
+                pass
+
+        def factory(device, *args, **kwargs):
+            opened.append(device)
+            if device == 0:
+                return FakeCapture(640, 480, 15)
+            return FailCapture()
+
+        monkeypatch.setattr("cv2.VideoCapture", factory)
+        system.night_device = 1
+        system.set_night_mode(True)
+        assert system._active_device == 0
+        assert opened.count(0) >= 1
+
+    def test_night_device_active_property(self, system, monkeypatch):
+        monkeypatch.setattr("cv2.VideoCapture", lambda *a, **k: FakeCapture(640, 480, 15))
+        system.night_device = 1
+        system.set_night_mode(True)
+        assert system.night_device_active is True
+        system.set_night_mode(False)
+        assert system.night_device_active is False
+
+    def test_software_enhance_disabled_for_ir_camera(self, system):
+        system.night_device = 1
+        system.night_software_enhance = False
+        system.night_mode = True
+        system._active_device = 1
+        frame = np.ones((10, 10, 3), dtype=np.uint8) * 128
+        result = system._apply_night_mode(frame)
+        np.testing.assert_array_equal(result, frame)
 
 
 class TestMotionDetection:

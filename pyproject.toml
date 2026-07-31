@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cheapsecurity"
-version = "0.1.0"
+version = "1.0.0"
 description = "Lightweight CCTV system for the Odroid XU4 (or any Linux board) with a USB webcam"
 readme = "README.md"
 license = {text = "GNU Affero General Public License v3 or later"}
