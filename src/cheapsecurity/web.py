@@ -177,6 +177,9 @@ def api_status() -> RouteReturn:
             resolution: {type: string}
             fps: {type: number}
             night_mode: {type: boolean}
+            night_mode_strength: {type: string}
+            night_device_active: {type: boolean}
+            night_device_configured: {type: boolean}
             notifications_enabled: {type: boolean}
             telegram_enabled: {type: boolean}
             auth_enabled: {type: boolean}
@@ -189,6 +192,9 @@ def api_status() -> RouteReturn:
             resolution: "2560x1440"
             fps: 30.0
             night_mode: false
+            night_mode_strength: normal
+            night_device_active: false
+            night_device_configured: false
             notifications_enabled: false
             telegram_enabled: true
             auth_enabled: true
@@ -208,6 +214,9 @@ def api_status() -> RouteReturn:
             else f"{cctv.width}x{cctv.height}",
             "fps": cctv.actual_fps,
             "night_mode": cctv.night_mode,
+            "night_mode_strength": cctv.night_mode_strength,
+            "night_device_active": cctv.night_device_active,
+            "night_device_configured": cctv.night_device is not None,
             "notifications_enabled": cctv.notifications_enabled,
             "telegram_enabled": cctv.telegram_enabled,
             "auth_enabled": cctv.cfg.get("web", {}).get("auth", {}).get("enabled", False),
@@ -351,11 +360,8 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    # Create temporary file on disk to avoid RAM exhaustion OOM crashes.
-    # Place it in the recordings directory so large selections do not fill /tmp.
-    temp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir))
-    temp_zip_path = temp_zip.name
-    temp_zip.close()
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir)) as temp_zip:
+        temp_zip_path = temp_zip.name
 
     @after_this_request
     def remove_file(response: Response) -> Response:
@@ -583,12 +589,18 @@ def api_settings() -> RouteReturn:
           type: object
           properties:
             night_mode: {type: boolean}
+            night_mode_strength: {type: string}
+            night_device_active: {type: boolean}
+            night_device_configured: {type: boolean}
             notifications_enabled: {type: boolean}
             telegram_enabled: {type: boolean}
             auth_enabled: {type: boolean}
         examples:
           application/json:
             night_mode: false
+            night_mode_strength: normal
+            night_device_active: false
+            night_device_configured: false
             notifications_enabled: false
             telegram_enabled: true
             auth_enabled: true
@@ -600,6 +612,9 @@ def api_settings() -> RouteReturn:
     return jsonify(
         {
             "night_mode": cctv.night_mode,
+            "night_mode_strength": cctv.night_mode_strength,
+            "night_device_active": cctv.night_device_active,
+            "night_device_configured": cctv.night_device is not None,
             "notifications_enabled": cctv.notifications_enabled,
             "telegram_enabled": cctv.telegram_enabled,
             "auth_enabled": cctv.cfg.get("web", {}).get("auth", {}).get("enabled", False),
@@ -644,7 +659,7 @@ def api_set_telegram() -> RouteReturn:
 
 @app.route("/api/settings/night_mode", methods=["POST"])
 def api_set_night_mode() -> RouteReturn:
-    """Enable or disable night mode.
+    """Enable or disable night mode and optionally set its strength.
     ---
     tags:
       - settings
@@ -658,12 +673,16 @@ def api_set_night_mode() -> RouteReturn:
           type: object
           properties:
             enabled: {type: boolean, example: true}
+            strength: {type: string, example: low}
     responses:
       200:
         description: New night mode setting
         examples:
           application/json:
             night_mode: true
+            night_mode_strength: low
+            night_device_active: true
+            night_device_configured: true
       403:
         description: CSRF protection triggered
       503:
@@ -673,8 +692,18 @@ def api_set_night_mode() -> RouteReturn:
         return jsonify({"error": "CCTV not initialized"}), 503
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", cctv.night_mode))
+    strength = data.get("strength", cctv.night_mode_strength)
     cctv.set_night_mode(enabled)
-    return jsonify({"night_mode": enabled})
+    if isinstance(strength, str):
+        cctv.set_night_mode_strength(strength)
+    return jsonify(
+        {
+            "night_mode": cctv.night_mode,
+            "night_mode_strength": cctv.night_mode_strength,
+            "night_device_active": cctv.night_device_active,
+            "night_device_configured": cctv.night_device is not None,
+        }
+    )
 
 
 @app.route("/api/settings/notifications", methods=["POST"])

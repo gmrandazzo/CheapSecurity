@@ -54,6 +54,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cctv")
 
+# Night-mode enhancement profiles. Lower clip limits and larger tiles reduce
+# noise amplification; lower gamma values lift shadows more aggressively.
+_NIGHT_MODE_PROFILES: dict[str, dict[str, float | int]] = {
+    "low": {"gamma": 0.65, "clip_limit": 1.0, "tile_grid": 16},
+    "normal": {"gamma": 0.50, "clip_limit": 2.0, "tile_grid": 12},
+    "aggressive": {"gamma": 0.35, "clip_limit": 3.0, "tile_grid": 8},
+}
+
 
 class CCTVSystem:
     def __init__(self, config_path: str = "config.json"):
@@ -72,10 +80,23 @@ class CCTVSystem:
         self.night_mode_gain = cam.get("night_mode_gain", 255)
         self.night_mode_brightness = cam.get("night_mode_brightness", 200)
         self.night_mode_contrast = cam.get("night_mode_contrast", 200)
+        strength = cam.get("night_mode_strength", "normal")
+        self.night_mode_strength: str = (
+            strength.lower().strip() if isinstance(strength, str) else "normal"
+        )
+        if self.night_mode_strength not in _NIGHT_MODE_PROFILES:
+            self.night_mode_strength = "normal"
+
+        # Optional second camera used when night mode is enabled.
+        self.night_device: int | str | None = cam.get("night_device")
+        self.night_device_width: int = cam.get("night_device_width", self.width)
+        self.night_device_height: int = cam.get("night_device_height", self.height)
+        self.night_device_fps: int = cam.get("night_device_fps", self.fps)
+        self.night_software_enhance: bool = cam.get("night_software_enhance", True)
+        self._active_device: int | str = self.device
 
         self._normal_brightness: float | None = None
         self._normal_contrast: float | None = None
-        self._clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 
         mot = self.cfg["motion"]
         self.threshold = mot["threshold"]
@@ -139,6 +160,7 @@ class CCTVSystem:
         self._writer_fps: float = 0.0
         self._frames_written: int = 0
         self._consecutive_frame_failures: int = 0
+        self._reconnect_backoff: float = 1.0
         self.is_recording = False
         self.last_motion_time: float = 0.0
         self.recording_started: float = 0.0
@@ -207,7 +229,20 @@ class CCTVSystem:
         self.cfg.setdefault("camera", {})["night_mode"] = enabled
         self._save_config()
         logger.info(f"Night mode {'enabled' if enabled else 'disabled'}")
-        self._apply_camera_night_mode()
+        if self.night_device is not None:
+            self._switch_camera()
+        else:
+            self._apply_camera_night_mode()
+
+    def set_night_mode_strength(self, strength: str) -> None:
+        """Set the night-mode enhancement strength (low, normal, aggressive)."""
+        strength = (strength or "normal").lower().strip()
+        if strength not in _NIGHT_MODE_PROFILES:
+            strength = "normal"
+        self.night_mode_strength = strength
+        self.cfg.setdefault("camera", {})["night_mode_strength"] = strength
+        self._save_config()
+        logger.info(f"Night mode strength set to {strength}")
 
     def set_telegram_enabled(self, enabled: bool) -> None:
         self.telegram_enabled = enabled
@@ -225,6 +260,11 @@ class CCTVSystem:
         self.cfg.setdefault("web", {}).setdefault("auth", {})["enabled"] = enabled
         self._save_config()
         logger.info(f"Web auth {'enabled' if enabled else 'disabled'}")
+
+    @property
+    def night_device_active(self) -> bool:
+        """True when the optional IR/night camera is currently in use."""
+        return self.night_device is not None and self._active_device == self.night_device
 
     def _save_config(self) -> None:
         with self._config_lock:
@@ -290,9 +330,16 @@ class CCTVSystem:
 
             # Reconnect if the camera was released (e.g. by too many frame failures)
             if self.cap is None:
-                if not self._open_capture():
-                    logger.error("Camera reconnect failed, halting engine.")
-                    return
+                # Give the kernel time to re-enumerate the USB camera before retrying.
+                time.sleep(self._reconnect_backoff)
+                if self._open_capture():
+                    logger.info("Camera reconnected.")
+                    self._reconnect_backoff = 1.0
+                else:
+                    logger.warning(
+                        f"Camera reconnect failed; retrying in {self._reconnect_backoff:.1f}s..."
+                    )
+                    self._reconnect_backoff = min(self._reconnect_backoff * 2, 30.0)
                 continue
 
             with self._cap_lock:
@@ -311,6 +358,12 @@ class CCTVSystem:
                 time.sleep(0.1)
                 continue
             self._consecutive_frame_failures = 0
+
+            # Some IR cameras return a grayscale frame; normalize to BGR so
+            # the rest of the pipeline (motion detection, recording, stream)
+            # always works with 3 channels.
+            if frame.ndim == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
             # Enhance low-light visibility when night mode is on
             frame = self._apply_night_mode(frame)
@@ -390,41 +443,133 @@ class CCTVSystem:
     # ------------------------------------------------------------------
     # Camera
     # ------------------------------------------------------------------
-    def _open_capture(self) -> bool:
-        with self._cap_lock:
-            logger.info(f"Opening camera /dev/video{self.device}")
-            self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
-            if not self.cap.isOpened():
-                # Fallback to default backend
-                self.cap = cv2.VideoCapture(self.device)
-            if not self.cap.isOpened():
-                logger.error(f"Failed to open camera device {self.device}")
-                return False
+    def _open_device(
+        self,
+        device: int | str,
+        width: int,
+        height: int,
+        fps: int,
+        *,
+        save_defaults: bool = False,
+    ) -> cv2.VideoCapture | None:
+        """Open a single V4L2 device with the requested resolution and FPS.
 
-            # Request MJPG pixel format so high resolutions (e.g. 2K) are available
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        Returns the capture object on success, or None if the device could not
+        be opened. The caller is responsible for assigning the result to
+        ``self.cap`` under ``self._cap_lock``.
+        """
+        logger.info(f"Opening camera /dev/video{device}")
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            # Fallback to default backend
+            cap = cv2.VideoCapture(device)
+        if not cap.isOpened():
+            logger.error(f"Failed to open camera device {device}")
+            return None
 
-            actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-            if actual_fps > 0:
-                self.actual_fps = actual_fps
-            else:
-                self.actual_fps = self.fps
-            logger.info(
-                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
-            )
+        # Request MJPG pixel format so high resolutions (e.g. 2K) are available
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, fps)
 
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        if actual_fps > 0:
+            self.actual_fps = actual_fps
+        else:
+            self.actual_fps = fps
+        logger.info(
+            f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+        )
+
+        if save_defaults:
             # Capture current camera defaults before any night-mode changes
-            self._normal_brightness = self.cap.get(cv2.CAP_PROP_BRIGHTNESS)
-            self._normal_contrast = self.cap.get(cv2.CAP_PROP_CONTRAST)
+            self._normal_brightness = cap.get(cv2.CAP_PROP_BRIGHTNESS)
+            self._normal_contrast = cap.get(cv2.CAP_PROP_CONTRAST)
             logger.info(
-                f"Camera defaults — Brightness: {self._normal_brightness}, Contrast: {self._normal_contrast}"
+                f"Camera defaults — Brightness: {self._normal_brightness}, "
+                f"Contrast: {self._normal_contrast}"
             )
 
+        return cap
+
+    def _open_capture(self) -> bool:
+        """Open the camera that matches the current night mode."""
+        if self.night_mode and self.night_device is not None:
+            device = self.night_device
+            width = self.night_device_width
+            height = self.night_device_height
+            fps = self.night_device_fps
+            save_defaults = False
+        else:
+            device = self.device
+            width = self.width
+            height = self.height
+            fps = self.fps
+            save_defaults = True
+
+        cap = self._open_device(device, width, height, fps, save_defaults=save_defaults)
+        if cap is None:
+            return False
+
+        with self._cap_lock:
+            self.cap = cap
+            self._active_device = device
+        self._apply_camera_night_mode()
+        return True
+
+    def _switch_camera(self) -> bool:
+        """Release the current camera and open the one for the current mode.
+
+        If the requested night camera fails to open, fall back to the day
+        camera so the system keeps running.
+        """
+        if self.is_recording:
+            logger.info("Stopping recording before camera switch.")
+            self._stop_recording()
+
+        if self.night_mode and self.night_device is not None:
+            target_device = self.night_device
+            width = self.night_device_width
+            height = self.night_device_height
+            fps = self.night_device_fps
+            save_defaults = False
+            label = "night"
+        else:
+            target_device = self.device
+            width = self.width
+            height = self.height
+            fps = self.fps
+            save_defaults = True
+            label = "day"
+
+        self._release_capture()
+        cap = self._open_device(
+            target_device, width, height, fps, save_defaults=save_defaults
+        )
+
+        if cap is None and self.night_mode and self.night_device is not None:
+            logger.warning("Night camera failed to open; falling back to day camera.")
+            target_device = self.device
+            width = self.width
+            height = self.height
+            fps = self.fps
+            save_defaults = True
+            label = "day"
+            cap = self._open_device(
+                target_device, width, height, fps, save_defaults=save_defaults
+            )
+
+        if cap is None:
+            logger.error("Camera switch failed; waiting for reconnect loop.")
+            return False
+
+        with self._cap_lock:
+            self.cap = cap
+            self._active_device = target_device
+        logger.info(f"Switched to {label} camera (/dev/video{target_device}).")
         self._apply_camera_night_mode()
         return True
 
@@ -435,9 +580,18 @@ class CCTVSystem:
                 self.cap = None
 
     def _apply_camera_night_mode(self) -> None:
-        """Try to tune V4L2 camera properties for low light."""
+        """Try to tune V4L2 camera properties for low light.
+
+        Skip the gain/brightness tweaks when the active device is the optional
+        IR/night camera, because those controls are usually not meaningful on
+        IR modules.
+        """
         with self._cap_lock:
             if not self.cap or not self.cap.isOpened():
+                return
+
+            if self._active_device == self.night_device:
+                logger.info("Night camera active; skipping V4L2 gain/brightness tuning.")
                 return
 
             if self.night_mode:
@@ -485,7 +639,7 @@ class CCTVSystem:
 
         diff = cv2.absdiff(self._prev_gray, gray)
         _, thresh = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(thresh, None, iterations=2)
+        thresh = cv2.dilate(thresh, None, iterations=2)  # type: ignore[call-overload]
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         self._prev_gray = gray
@@ -530,7 +684,7 @@ class CCTVSystem:
         # Use measured loop FPS so playback duration matches wall-clock time.
         writer_fps = max(1.0, min(60.0, self.measured_fps))
         self._writer_fps = writer_fps
-        fourcc = cv2.VideoWriter_fourcc(*self.codec_fourcc)
+        fourcc = cv2.VideoWriter.fourcc(*self.codec_fourcc)
         writer = cv2.VideoWriter(path, fourcc, writer_fps, (width, height))
         if writer.isOpened():
             logger.info(f"Video writer created at {writer_fps:.2f} fps")
@@ -542,7 +696,7 @@ class CCTVSystem:
             fallback_path = path
             if ext != self.video_ext:
                 fallback_path = str(Path(path).with_suffix(ext))
-            fourcc = cv2.VideoWriter_fourcc(*codec)
+            fourcc = cv2.VideoWriter.fourcc(*codec)
             writer = cv2.VideoWriter(fallback_path, fourcc, writer_fps, (width, height))
             if writer.isOpened():
                 self.recording_path = Path(fallback_path)
@@ -689,12 +843,38 @@ class CCTVSystem:
     # Streaming
     # ------------------------------------------------------------------
     def _apply_night_mode(self, frame: np.ndarray) -> np.ndarray:
-        """Enhance low-light visibility using CLAHE on the L channel."""
+        """Enhance low-light visibility using gamma correction + CLAHE.
+
+        The strength is selected from ``_NIGHT_MODE_PROFILES`` so users can
+        choose between a gentle lift (low), balanced enhancement (normal),
+        or the previous aggressive CLAHE behavior.
+
+        When a dedicated IR/night camera is active and software enhancement is
+        disabled, the frame is returned unchanged.
+        """
         if not self.night_mode:
             return frame
+        if self._active_device == self.night_device and not self.night_software_enhance:
+            return frame
+
+        profile = _NIGHT_MODE_PROFILES.get(
+            self.night_mode_strength, _NIGHT_MODE_PROFILES["normal"]
+        )
+        gamma = float(profile["gamma"])
+
         lab: np.ndarray = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         lightness, a, b = cv2.split(lab)
-        lightness = self._clahe.apply(lightness)
+
+        if gamma != 1.0 and gamma > 0.0:
+            inv_gamma = 1.0 / gamma
+            table = ((np.arange(256, dtype=np.float32) / 255.0) ** inv_gamma) * 255.0
+            lightness = cv2.LUT(lightness, table.astype(np.uint8))
+
+        clahe = cv2.createCLAHE(
+            clipLimit=float(profile["clip_limit"]),
+            tileGridSize=(int(profile["tile_grid"]), int(profile["tile_grid"])),
+        )
+        lightness = clahe.apply(lightness)
         lab = cv2.merge([lightness, a, b])
         return np.asarray(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
 
@@ -1129,6 +1309,28 @@ class CCTVSystem:
         elif cmd[0] == "/email_off":
             self.set_notifications_enabled(False)
             self._send_telegram_message("Email notifications disabled.", chat_id)
+        elif cmd[0] == "/night_mode_on":
+            self.set_night_mode(True)
+            self._send_telegram_message(
+                f"Night mode enabled (strength: {self.night_mode_strength}).", chat_id
+            )
+        elif cmd[0] == "/night_mode_off":
+            self.set_night_mode(False)
+            self._send_telegram_message("Night mode disabled.", chat_id)
+        elif cmd[0] == "/night_mode":
+            if len(cmd) > 1 and cmd[1] in _NIGHT_MODE_PROFILES:
+                self.set_night_mode_strength(cmd[1])
+                if not self.night_mode:
+                    self.set_night_mode(True)
+                self._send_telegram_message(
+                    f"Night mode enabled with {self.night_mode_strength} strength.", chat_id
+                )
+            else:
+                self._send_telegram_message(
+                    "Usage: /night_mode low | normal | aggressive\n"
+                    "Use /night_mode_off to disable.",
+                    chat_id,
+                )
         elif cmd[0] == "/help":
             self._send_telegram_message(
                 "Available commands:\n"
@@ -1141,6 +1343,9 @@ class CCTVSystem:
                 "/id - reply to any bot message with this to see its message ID\n"
                 "/telegram_on /telegram_off - enable or disable auto Telegram uploads\n"
                 "/email_on /email_off - enable or disable email notifications\n"
+                "/night_mode_on /night_mode_off - enable or disable night mode\n"
+                "  (switches to the IR camera if one is configured)\n"
+                "/night_mode low|normal|aggressive - set night-mode enhancement strength\n"
                 "/help - show this help",
                 chat_id,
             )

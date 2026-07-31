@@ -66,7 +66,7 @@ def main() -> None:
         print("✗ Cannot open camera")
         return
 
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg["width"])
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg["height"])
     cap.set(cv2.CAP_PROP_FPS, cam_cfg["fps"])
@@ -106,7 +106,7 @@ def main() -> None:
 
         diff = cv2.absdiff(prev_gray, gray)
         _, thresh = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(thresh, None, iterations=2)
+        thresh = cv2.dilate(thresh, None, iterations=2)  # type: ignore[call-overload]
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         prev_gray = gray
 

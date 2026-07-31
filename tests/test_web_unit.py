@@ -5,6 +5,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+
 from cheapsecurity.web import app
 
 
@@ -25,6 +26,9 @@ def client(monkeypatch):
     fake_cctv.height = 480
     fake_cctv.actual_fps = 15.0
     fake_cctv.night_mode = False
+    fake_cctv.night_mode_strength = "normal"
+    fake_cctv.night_device_active = False
+    fake_cctv.night_device_configured = False
     fake_cctv.notifications_enabled = False
     fake_cctv.telegram_enabled = False
     fake_cctv.list_recordings.return_value = []

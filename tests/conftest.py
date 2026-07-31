@@ -3,8 +3,9 @@
 import json
 
 import pytest
-from cheapsecurity.cctv import CCTVSystem
 from helpers import FakeCapture
+
+from cheapsecurity.cctv import CCTVSystem
 
 
 @pytest.fixture
@@ -17,6 +18,12 @@ def config_dict():
             "height": 480,
             "fps": 15,
             "night_mode": False,
+            "night_mode_strength": "normal",
+            "night_device": None,
+            "night_device_width": 640,
+            "night_device_height": 480,
+            "night_device_fps": 15,
+            "night_software_enhance": True,
             "night_mode_fps": 5,
             "night_mode_gain": 255,
             "night_mode_brightness": 200,

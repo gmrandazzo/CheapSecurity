@@ -1,5 +1,8 @@
 # CheapSecurity
 This project provides a lightweight, self-hosted CCTV solution designed for Linux-based single-board computers (SBCs) and standard USB webcams. It offers an affordable, privacy-focused alternative for home monitoring by keeping your video data entirely under your control.
+
+![CheapSecurity web interface preview](preview.gif)
+
 Project Philosophy
 
 - Privacy-First: By storing all footage locally, this system eliminates the need for third-party cloud subscriptions and ensures your data never leaves your network.
@@ -22,7 +25,7 @@ Key Features
 - **Telegram integration**:
   - Automatic video upload after motion is recorded
   - Bot commands: `/snapshot`, `/video <seconds>`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
-- **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost)
+- **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost, with optional second IR/night camera)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
 - **Interactive Swagger UI** at `/api/` for the REST API
 - **RTSP output** via MediaMTX + FFmpeg (optional, disabled by default)
@@ -114,7 +117,11 @@ Edit `config.json`:
 |---------|-----|-------------|
 | `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) |
 | `camera` | `width`, `height`, `fps` | Capture resolution and frame rate |
-| `camera` | `night_mode` | Enable low-light enhancement |
+| `camera` | `night_mode` | Enable low-light enhancement / IR camera switching |
+| `camera` | `night_mode_strength` | Software enhancement strength: `low`, `normal`, or `aggressive` |
+| `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`). Set to `null` to use a single camera. |
+| `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera |
+| `camera` | `night_software_enhance` | Apply CLAHE/gamma to the IR camera feed (`true`/`false`) |
 | `camera` | `night_mode_fps` | Target FPS in night mode (camera may ignore this) |
 | `camera` | `night_mode_gain` | Target analog gain in night mode (camera may ignore this) |
 | `camera` | `night_mode_brightness` | Brightness boost in night mode |
@@ -267,15 +274,47 @@ Google no longer allows "less secure apps" to use your regular Gmail password. Y
 
 ## Night mode
 
-Night mode combines:
+Night mode can work in two ways:
 
-- **Software enhancement** (CLAHE on the L channel)
+### Single camera (software enhancement)
+
+The default mode improves a dark scene from one USB camera using:
+
+- **Software enhancement** (gamma correction + CLAHE on the L channel)
 - **Camera brightness/contrast boost**
 - Attempts to lower FPS and raise gain/ISO if the camera supports it
 
-Toggle it from the dashboard. It is applied to the live stream, recordings, and alert pictures.
+The strength of the software enhancement is selectable from the dashboard or Telegram: `low`, `normal`, or `aggressive`.
 
-**Important:** most USB webcams do not expose ISO/gain/exposure controls via V4L2, so FPS/gain adjustments may be ignored. True night vision requires an **IR-sensitive camera** and an **IR illuminator**.
+**Important:** most USB webcams do not expose ISO/gain/exposure controls via V4L2, so FPS/gain adjustments may be ignored. The result is usually noisy and only useful with some ambient light.
+
+### Dual-camera night vision (hardware/IR)
+
+For real night vision you can connect a second camera such as an **IR-sensitive USB camera** or a camera with an **IR cut filter removed**, optionally with an **IR illuminator**. When `camera.night_device` is set, enabling night mode automatically switches the video source from the day camera to the IR camera; disabling it switches back. Only one camera is open at a time, so USB bandwidth is not doubled.
+
+Example configuration:
+
+```json
+"camera": {
+  "device": 0,
+  "width": 2560,
+  "height": 1440,
+  "fps": 15,
+  "night_mode": false,
+  "night_mode_strength": "low",
+  "night_device": 1,
+  "night_device_width": 1280,
+  "night_device_height": 720,
+  "night_device_fps": 15,
+  "night_software_enhance": false
+}
+```
+
+- `night_device` — V4L2 device index of the IR camera (e.g. `1` for `/dev/video1`). Set to `null` for single-camera mode.
+- `night_device_width/height/fps` — resolution and frame rate of the IR camera.
+- `night_software_enhance` — set to `false` if the IR image is already usable; set to `true` if you want the CLAHE/gamma enhancement applied to the IR feed as well.
+
+If the IR camera fails to open, the system falls back to the day camera and logs a warning.
 
 ## Storage and cleanup
 
@@ -357,12 +396,6 @@ curl -u admin:changeme \
   - **Download selected** (ZIP)
   - **Delete selected**
 - Link to the **Swagger API docs** at `/api/`
-
-### Preview
-
-The GIF below shows the dashboard in action: live MJPEG stream, real-time status panel, quick settings toggles, and the recordings list with bulk actions.
-
-![CheapSecurity web interface preview](preview.gif)
 
 ## Enabling RTSP output (optional)
 

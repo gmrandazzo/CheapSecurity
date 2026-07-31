@@ -55,6 +55,17 @@
         <input type="checkbox" id="night-toggle" onchange="setNightMode(this.checked)">
         <span>🌙 Night mode (low-light enhancement)</span>
       </label>
+      <label class="select-row">
+        <span>Night mode strength</span>
+        <select id="night-strength" onchange="setNightModeStrength(this.value)">
+          <option value="low">Low (less noise)</option>
+          <option value="normal">Normal</option>
+          <option value="aggressive">Aggressive</option>
+        </select>
+      </label>
+      <p id="night-camera-status" class="camera-status" style="display: none;">
+        Active camera: <strong id="night-camera-label">Day camera</strong>
+      </p>
       <label class="toggle">
         <input type="checkbox" id="telegram-toggle" onchange="setTelegram(this.checked)">
         <span>Telegram video notifications</span>
