@@ -35,7 +35,7 @@ jobs:
         run: ruff check src tests
 
       - name: Type check
-        run: mypy src
+        run: mypy src tests
 
       - name: Run tests
         run: pytest -q

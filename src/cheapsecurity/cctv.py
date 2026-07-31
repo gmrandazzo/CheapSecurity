@@ -468,7 +468,7 @@ class CCTVSystem:
             return None
 
         # Request MJPG pixel format so high resolutions (e.g. 2K) are available
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G"))
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, fps)
@@ -639,7 +639,7 @@ class CCTVSystem:
 
         diff = cv2.absdiff(self._prev_gray, gray)
         _, thresh = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(thresh, None, iterations=2)
+        thresh = cv2.dilate(thresh, None, iterations=2)  # type: ignore[call-overload]
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         self._prev_gray = gray
@@ -684,7 +684,7 @@ class CCTVSystem:
         # Use measured loop FPS so playback duration matches wall-clock time.
         writer_fps = max(1.0, min(60.0, self.measured_fps))
         self._writer_fps = writer_fps
-        fourcc = cv2.VideoWriter_fourcc(*self.codec_fourcc)
+        fourcc = cv2.VideoWriter.fourcc(*self.codec_fourcc)
         writer = cv2.VideoWriter(path, fourcc, writer_fps, (width, height))
         if writer.isOpened():
             logger.info(f"Video writer created at {writer_fps:.2f} fps")
@@ -696,7 +696,7 @@ class CCTVSystem:
             fallback_path = path
             if ext != self.video_ext:
                 fallback_path = str(Path(path).with_suffix(ext))
-            fourcc = cv2.VideoWriter_fourcc(*codec)
+            fourcc = cv2.VideoWriter.fourcc(*codec)
             writer = cv2.VideoWriter(fallback_path, fourcc, writer_fps, (width, height))
             if writer.isOpened():
                 self.recording_path = Path(fallback_path)
