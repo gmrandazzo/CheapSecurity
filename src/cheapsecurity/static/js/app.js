@@ -300,22 +300,26 @@ async function downloadSelected() {
   }
 }
 
+let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, gdrive_enabled: false, onedrive_enabled: false, auth_enabled: false };
+
 async function loadSettings() {
   try {
     const res = await fetch('/api/settings');
     const data = await res.json();
-    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.auth_enabled);
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.gdrive_enabled, data.onedrive_enabled, data.auth_enabled);
   } catch (e) {
     console.error('Failed to load settings', e);
   }
 }
 
-function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, auth) {
-  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, auth_enabled: auth };
+function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, gdrive, onedrive, auth) {
+  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, gdrive_enabled: gdrive, onedrive_enabled: onedrive, auth_enabled: auth };
   document.getElementById('night-toggle').checked = night;
   document.getElementById('night-strength').value = nightStrength || 'normal';
   document.getElementById('notif-toggle').checked = notifications;
   document.getElementById('telegram-toggle').checked = telegram;
+  if (document.getElementById('gdrive-toggle')) document.getElementById('gdrive-toggle').checked = Boolean(gdrive);
+  if (document.getElementById('onedrive-toggle')) document.getElementById('onedrive-toggle').checked = Boolean(onedrive);
   document.getElementById('auth-toggle').checked = auth;
   updateNightCameraStatus();
 }
@@ -394,6 +398,36 @@ async function setNotifications(enabled) {
   }
 }
 
+async function setGDrive(enabled) {
+  try {
+    const res = await fetch('/api/settings/gdrive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await res.json();
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, data.gdrive_enabled, currentSettings.onedrive_enabled, currentSettings.auth_enabled);
+  } catch (e) {
+    alert('Failed to update Google Drive setting');
+    loadSettings();
+  }
+}
+
+async function setOneDrive(enabled) {
+  try {
+    const res = await fetch('/api/settings/onedrive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await res.json();
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.gdrive_enabled, data.onedrive_enabled, currentSettings.auth_enabled);
+  } catch (e) {
+    alert('Failed to update OneDrive setting');
+    loadSettings();
+  }
+}
+
 async function setAuth(enabled) {
   try {
     const res = await fetch('/api/settings/auth', {
@@ -402,7 +436,7 @@ async function setAuth(enabled) {
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
-    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, data.auth_enabled);
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.gdrive_enabled, currentSettings.onedrive_enabled, data.auth_enabled);
   } catch (e) {
     alert('Failed to update auth setting');
     loadSettings();

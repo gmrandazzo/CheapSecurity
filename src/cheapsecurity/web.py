@@ -619,6 +619,8 @@ def api_settings() -> RouteReturn:
             "night_device_configured": cctv.night_device is not None,
             "notifications_enabled": cctv.notifications_enabled,
             "telegram_enabled": cctv.telegram_enabled,
+            "gdrive_enabled": cctv.gdrive_enabled,
+            "onedrive_enabled": cctv.onedrive_enabled,
             "auth_enabled": cctv.cfg.get("web", {}).get("auth", {}).get("enabled", False),
         }
     )
@@ -657,6 +659,76 @@ def api_set_telegram() -> RouteReturn:
     enabled = bool(data.get("enabled", cctv.telegram_enabled))
     cctv.set_telegram_enabled(enabled)
     return jsonify({"telegram_enabled": enabled})
+
+
+@app.route("/api/settings/gdrive", methods=["POST"])
+def api_set_gdrive() -> RouteReturn:
+    """Enable or disable Google Drive uploads.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New Google Drive setting
+        examples:
+          application/json:
+            gdrive_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", cctv.gdrive_enabled))
+    cctv.set_gdrive_enabled(enabled)
+    return jsonify({"gdrive_enabled": enabled})
+
+
+@app.route("/api/settings/onedrive", methods=["POST"])
+def api_set_onedrive() -> RouteReturn:
+    """Enable or disable OneDrive uploads.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New OneDrive setting
+        examples:
+          application/json:
+            onedrive_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", cctv.onedrive_enabled))
+    cctv.set_onedrive_enabled(enabled)
+    return jsonify({"onedrive_enabled": enabled})
 
 
 @app.route("/api/settings/night_mode", methods=["POST"])

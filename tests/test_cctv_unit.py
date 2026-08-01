@@ -6,9 +6,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from helpers import FakeCapture
-
 from cheapsecurity.cctv import CCTVSystem
+from helpers import FakeCapture
 
 
 class TestCCTVSystemInit:
@@ -494,3 +493,26 @@ class TestTelegramMessageStore:
         assert system._parse_dim(1920) == 1920
         assert system._parse_dim("1080") == 1080
         assert system._parse_dim(None) == 0
+
+    def test_cloud_mutators_update_config(self, system):
+        system.set_gdrive_enabled(True)
+        assert system.gdrive_enabled is True
+        assert system.cfg["cloud"]["google_drive"]["enabled"] is True
+
+        system.set_onedrive_enabled(True)
+        assert system.onedrive_enabled is True
+        assert system.cfg["cloud"]["onedrive"]["enabled"] is True
+
+    def test_gdrive_upload_skips_when_credentials_missing(self, system, tmp_path):
+        dummy_file = tmp_path / "test.avi"
+        dummy_file.write_bytes(b"data")
+        system.gdrive_client_id = ""
+        system.gdrive_refresh_token = ""
+        assert system._upload_to_gdrive(dummy_file) is False
+
+    def test_onedrive_upload_skips_when_credentials_missing(self, system, tmp_path):
+        dummy_file = tmp_path / "test.avi"
+        dummy_file.write_bytes(b"data")
+        system.onedrive_client_id = ""
+        system.onedrive_refresh_token = ""
+        assert system._upload_to_onedrive(dummy_file) is False

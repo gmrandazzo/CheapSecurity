@@ -40,7 +40,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from types import FrameType
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -154,6 +154,22 @@ class CCTVSystem:
         self._telegram_offset: int = 0
         self._telegram_poll_thread: threading.Thread | None = None
 
+        # Cloud Storage (Google Drive & OneDrive)
+        cloud_cfg = self.cfg.get("cloud", {})
+        gdrive_cfg = cloud_cfg.get("google_drive", {})
+        self.gdrive_enabled = gdrive_cfg.get("enabled", False)
+        self.gdrive_client_id = gdrive_cfg.get("client_id", "")
+        self.gdrive_client_secret = gdrive_cfg.get("client_secret", "")
+        self.gdrive_refresh_token = gdrive_cfg.get("refresh_token", "")
+        self.gdrive_folder_id = gdrive_cfg.get("folder_id", "")
+
+        onedrive_cfg = cloud_cfg.get("onedrive", {})
+        self.onedrive_enabled = onedrive_cfg.get("enabled", False)
+        self.onedrive_client_id = onedrive_cfg.get("client_id", "")
+        self.onedrive_client_secret = onedrive_cfg.get("client_secret", "")
+        self.onedrive_refresh_token = onedrive_cfg.get("refresh_token", "")
+        self.onedrive_folder_path = onedrive_cfg.get("folder_path", "CheapSecurity")
+
         self.cap: cv2.VideoCapture | None = None
         self.writer: cv2.VideoWriter | None = None
         self.recording_path: Path | None = None
@@ -260,6 +276,18 @@ class CCTVSystem:
         self.cfg.setdefault("web", {}).setdefault("auth", {})["enabled"] = enabled
         self._save_config()
         logger.info(f"Web auth {'enabled' if enabled else 'disabled'}")
+
+    def set_gdrive_enabled(self, enabled: bool) -> None:
+        self.gdrive_enabled = enabled
+        self.cfg.setdefault("cloud", {}).setdefault("google_drive", {})["enabled"] = enabled
+        self._save_config()
+        logger.info(f"Google Drive uploads {'enabled' if enabled else 'disabled'}")
+
+    def set_onedrive_enabled(self, enabled: bool) -> None:
+        self.onedrive_enabled = enabled
+        self.cfg.setdefault("cloud", {}).setdefault("onedrive", {})["enabled"] = enabled
+        self._save_config()
+        logger.info(f"OneDrive uploads {'enabled' if enabled else 'disabled'}")
 
     @property
     def night_device_active(self) -> bool:
@@ -806,6 +834,7 @@ class CCTVSystem:
                     f"Recording saved: {self.recording_path.name} ({self._human_size(size)})"
                 )
                 self._maybe_send_telegram(self.recording_path)
+                self._maybe_upload_cloud(self.recording_path)
 
             self.recording_path = None
         self.is_recording = False
@@ -900,6 +929,7 @@ class CCTVSystem:
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
             try:
                 self._send_telegram_video(path, chat_id=chat_id)
+                self._maybe_upload_cloud(path)
             except Exception as e:
                 logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
         finally:
@@ -1565,6 +1595,123 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"Failed to handle video command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to start recording.", chat_id)
+
+    # ------------------------------------------------------------------
+    # Cloud Storage Uploads (Google Drive & OneDrive)
+    # ------------------------------------------------------------------
+    def _upload_to_gdrive(self, video_path: Path) -> bool:
+        """Upload a video recording to Google Drive via Google Drive REST API v3."""
+        if not self.gdrive_refresh_token or not self.gdrive_client_id:
+            logger.warning("Google Drive credentials not configured; skipping upload.")
+            return False
+
+        try:
+            token_url = "https://oauth2.googleapis.com/token"
+            token_data = {
+                "client_id": self.gdrive_client_id,
+                "client_secret": self.gdrive_client_secret,
+                "refresh_token": self.gdrive_refresh_token,
+                "grant_type": "refresh_token",
+            }
+            token_resp = requests.post(token_url, data=token_data, timeout=30)
+            if token_resp.status_code != 200:
+                logger.error(
+                    f"Google Drive token refresh failed: {token_resp.status_code} {token_resp.text}"
+                )
+                return False
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                logger.error("No access_token returned from Google Drive OAuth.")
+                return False
+
+            upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            metadata: dict[str, str | list[str]] = {"name": video_path.name}
+            if self.gdrive_folder_id:
+                metadata["parents"] = [self.gdrive_folder_id]
+
+            with open(video_path, "rb") as f:
+                video_bytes = f.read()
+            files: dict[str, Any] = {
+                "data": ("metadata", json.dumps(metadata), "application/json; charset=UTF-8"),
+                "file": (video_path.name, video_bytes, "video/avi"),
+            }
+            resp = requests.post(upload_url, headers=headers, files=files, timeout=300)
+
+            if resp.status_code in (200, 201):
+                logger.info(f"Uploaded {video_path.name} to Google Drive.")
+                return True
+            else:
+                logger.error(f"Google Drive upload failed: {resp.status_code} {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Google Drive upload error: {e}")
+            return False
+
+    def _upload_to_onedrive(self, video_path: Path) -> bool:
+        """Upload a video recording to OneDrive via Microsoft Graph REST API."""
+        if not self.onedrive_refresh_token or not self.onedrive_client_id:
+            logger.warning("OneDrive credentials not configured; skipping upload.")
+            return False
+
+        try:
+            token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            token_data = {
+                "client_id": self.onedrive_client_id,
+                "client_secret": self.onedrive_client_secret,
+                "refresh_token": self.onedrive_refresh_token,
+                "grant_type": "refresh_token",
+                "scope": "Files.ReadWrite.All offline_access",
+            }
+            token_resp = requests.post(token_url, data=token_data, timeout=30)
+            if token_resp.status_code != 200:
+                logger.error(
+                    f"OneDrive token refresh failed: {token_resp.status_code} {token_resp.text}"
+                )
+                return False
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                logger.error("No access_token returned from OneDrive OAuth.")
+                return False
+
+            folder = self.onedrive_folder_path.strip("/")
+            filename = video_path.name
+            path_url = f"{folder}/{filename}" if folder else filename
+            upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{path_url}:/content"
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/octet-stream",
+            }
+            with open(video_path, "rb") as f:
+                resp = requests.put(upload_url, headers=headers, data=f, timeout=300)
+
+            if resp.status_code in (200, 201):
+                logger.info(f"Uploaded {video_path.name} to OneDrive.")
+                return True
+            else:
+                logger.error(f"OneDrive upload failed: {resp.status_code} {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"OneDrive upload error: {e}")
+            return False
+
+    def _maybe_upload_cloud(self, video_path: Path) -> None:
+        """Trigger background cloud uploads if enabled."""
+        if not video_path or not video_path.is_file():
+            return
+        if self.gdrive_enabled:
+            threading.Thread(
+                target=self._upload_to_gdrive,
+                args=(video_path,),
+                daemon=True,
+            ).start()
+        if self.onedrive_enabled:
+            threading.Thread(
+                target=self._upload_to_onedrive,
+                args=(video_path,),
+                daemon=True,
+            ).start()
 
     # ------------------------------------------------------------------
     # Storage cleanup

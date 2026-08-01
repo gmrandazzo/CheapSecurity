@@ -21,6 +21,10 @@ Key Features
 - **Live MJPEG stream** with a web dashboard
 - **Motion detection** with frame differencing
 - **Automatic recording** with a pre-motion buffer
+- **Interactive Recordings Calendar**: filter video recordings by date with pulsing red day badges
+- **Cloud Storage Integration**:
+  - Direct auto-upload of motion recordings to **Google Drive** (via Google Drive API v3)
+  - Direct auto-upload of motion recordings to **OneDrive** (via Microsoft Graph API)
 - **Email alerts** with a snapshot picture when motion starts
 - **Telegram integration**:
   - Automatic video upload after motion is recorded
@@ -143,6 +147,8 @@ Edit `config.json`:
 | `telegram` | `send_video` | Whether to upload the video file automatically |
 | `telegram` | `min_interval_minutes` | Minimum time between Telegram uploads |
 | `telegram` | `poll_commands` | Enable `/snapshot`, `/video`, and `/help` bot commands |
+| `cloud` | `google_drive` | Google Drive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, optional `folder_id`) |
+| `cloud` | `onedrive` | Microsoft OneDrive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, `folder_path`) |
 | `storage` | `max_age_days` | Delete recordings older than this (default 3 days = 72h) |
 | `storage` | `max_size_gb` | Delete oldest files if total exceeds this |
 | `storage` | `cleanup_interval_minutes` | How often storage cleanup runs |
