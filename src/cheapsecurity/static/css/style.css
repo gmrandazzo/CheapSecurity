@@ -199,3 +199,129 @@ button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Calendar Styles */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.card-header h2 {
+  margin: 0;
+}
+
+.calendar-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.secondary-btn {
+  background: #333;
+  color: var(--text);
+  border: 1px solid #444;
+}
+
+.secondary-btn:hover {
+  background: #444;
+}
+
+.icon-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 1.1rem;
+}
+
+#calendar-month-year {
+  font-weight: 600;
+  min-width: 130px;
+  text-align: center;
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  text-align: center;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid #333;
+  padding-bottom: 0.5rem;
+}
+
+.calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.calendar-day {
+  aspect-ratio: 1 / 1;
+  background: #262626;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px;
+  position: relative;
+  user-select: none;
+  border: 1px solid transparent;
+  transition: all 0.15s ease-in-out;
+}
+
+.calendar-day.other-month {
+  opacity: 0.25;
+  background: #1a1a1a;
+}
+
+.calendar-day.today {
+  border-color: var(--warn);
+}
+
+.calendar-day.has-recordings {
+  cursor: pointer;
+  background: #2e3b2e;
+  border-color: rgba(76, 175, 80, 0.4);
+}
+
+.calendar-day.has-recordings:hover {
+  background: #3a4e3a;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+}
+
+.calendar-day.selected-day {
+  border-color: var(--accent);
+  background: #284a29 !important;
+  box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
+}
+
+.calendar-day .day-num {
+  font-size: 0.85rem;
+  font-weight: 500;
+  align-self: flex-start;
+}
+
+.calendar-day .red-circle-badge {
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 8px rgba(244, 67, 54, 0.8);
+  animation: pulse-red 2s infinite ease-in-out;
+}
+
+@keyframes pulse-red {
+  0% { transform: scale(1); box-shadow: 0 0 4px rgba(244, 67, 54, 0.6); }
+  50% { transform: scale(1.1); box-shadow: 0 0 10px rgba(244, 67, 54, 1); }
+  100% { transform: scale(1); box-shadow: 0 0 4px rgba(244, 67, 54, 0.6); }
+}

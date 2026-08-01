@@ -360,7 +360,9 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir)) as temp_zip:
+    with tempfile.NamedTemporaryFile(
+        suffix=".zip", delete=False, dir=str(cctv.record_dir)
+    ) as temp_zip:
         temp_zip_path = temp_zip.name
 
     @after_this_request

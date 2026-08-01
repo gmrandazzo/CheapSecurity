@@ -74,17 +74,13 @@ class RTSPPublisher:
     def _start_mediamtx(self) -> bool:
         if not shutil.which(self.mediamtx_binary):
             logger.error(
-                f"MediaMTX binary not found: {self.mediamtx_binary}. "
-                "RTSP output disabled."
+                f"MediaMTX binary not found: {self.mediamtx_binary}. " "RTSP output disabled."
             )
             return False
 
         config_path = Path(self.mediamtx_config)
         if not config_path.is_file():
-            logger.error(
-                f"MediaMTX config not found: {config_path}. "
-                "RTSP output disabled."
-            )
+            logger.error(f"MediaMTX config not found: {config_path}. " "RTSP output disabled.")
             return False
 
         cmd = [

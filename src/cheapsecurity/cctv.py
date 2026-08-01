@@ -71,8 +71,8 @@ class CCTVSystem:
 
         cam = self.cfg["camera"]
         self.device = cam["device"]
-        self.width = cam["width"]
-        self.height = cam["height"]
+        self.width = self._parse_dim(cam.get("width", 2560))
+        self.height = self._parse_dim(cam.get("height", 1440))
         self.fps = cam["fps"]
         self.actual_fps = self.fps
         self.night_mode = cam.get("night_mode", False)
@@ -89,8 +89,8 @@ class CCTVSystem:
 
         # Optional second camera used when night mode is enabled.
         self.night_device: int | str | None = cam.get("night_device")
-        self.night_device_width: int = cam.get("night_device_width", self.width)
-        self.night_device_height: int = cam.get("night_device_height", self.height)
+        self.night_device_width: int = self._parse_dim(cam.get("night_device_width", self.width))
+        self.night_device_height: int = self._parse_dim(cam.get("night_device_height", self.height))
         self.night_device_fps: int = cam.get("night_device_fps", self.fps)
         self.night_software_enhance: bool = cam.get("night_software_enhance", True)
         self._active_device: int | str = self.device
@@ -332,6 +332,9 @@ class CCTVSystem:
             if self.cap is None:
                 # Give the kernel time to re-enumerate the USB camera before retrying.
                 time.sleep(self._reconnect_backoff)
+                with self._cap_lock:
+                    if self.cap is not None:
+                        continue
                 if self._open_capture():
                     logger.info("Camera reconnected.")
                     self._reconnect_backoff = 1.0
@@ -443,6 +446,21 @@ class CCTVSystem:
     # ------------------------------------------------------------------
     # Camera
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_dim(val: int | str | None) -> int:
+        """Parse dimension settings (width/height). Return 0 for auto/max."""
+        if val is None or val == 0:
+            return 0
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("auto", "max", "0", ""):
+                return 0
+            with contextlib.suppress(ValueError):
+                return int(s)
+        if isinstance(val, int):
+            return max(0, val)
+        return 0
+
     def _open_device(
         self,
         device: int | str,
@@ -467,10 +485,15 @@ class CCTVSystem:
             logger.error(f"Failed to open camera device {device}")
             return None
 
-        # Request MJPG pixel format so high resolutions (e.g. 2K) are available
+        # If width or height is <= 0 (auto/max), request oversized dimensions so
+        # V4L2 automatically clamps to the maximum supported hardware resolution.
+        req_w = 10000 if width <= 0 else width
+        req_h = 10000 if height <= 0 else height
+
+        # Request MJPG pixel format so high resolutions (e.g. 2K/4K) are available
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
         cap.set(cv2.CAP_PROP_FPS, fps)
 
         actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -480,9 +503,14 @@ class CCTVSystem:
             self.actual_fps = actual_fps
         else:
             self.actual_fps = fps
-        logger.info(
-            f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
-        )
+        if width <= 0 or height <= 0:
+            logger.info(
+                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+            )
+        else:
+            logger.info(
+                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+            )
 
         if save_defaults:
             # Capture current camera defaults before any night-mode changes
@@ -496,34 +524,61 @@ class CCTVSystem:
         return cap
 
     def _open_capture(self) -> bool:
-        """Open the camera that matches the current night mode."""
+        """Open the camera matching current mode, falling back to alternate if needed."""
         if self.night_mode and self.night_device is not None:
-            device = self.night_device
-            width = self.night_device_width
-            height = self.night_device_height
-            fps = self.night_device_fps
-            save_defaults = False
+            primary_device = self.night_device
+            primary_w, primary_h, primary_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            primary_defaults = False
+            fallback_device: int | str | None = self.device
+            fallback_w, fallback_h, fallback_fps = self.width, self.height, self.fps
+            fallback_defaults = True
         else:
-            device = self.device
-            width = self.width
-            height = self.height
-            fps = self.fps
-            save_defaults = True
+            primary_device = self.device
+            primary_w, primary_h, primary_fps = self.width, self.height, self.fps
+            primary_defaults = True
+            fallback_device = self.night_device
+            fallback_w, fallback_h, fallback_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            fallback_defaults = False
 
-        cap = self._open_device(device, width, height, fps, save_defaults=save_defaults)
+        cap = self._open_device(
+            primary_device, primary_w, primary_h, primary_fps, save_defaults=primary_defaults
+        )
+        active_dev = primary_device
+
+        if cap is None and fallback_device is not None:
+            logger.warning(
+                f"Camera device {primary_device} failed to open; trying fallback device {fallback_device}."
+            )
+            cap = self._open_device(
+                fallback_device,
+                fallback_w,
+                fallback_h,
+                fallback_fps,
+                save_defaults=fallback_defaults,
+            )
+            active_dev = fallback_device
+
         if cap is None:
             return False
 
         with self._cap_lock:
             self.cap = cap
-            self._active_device = device
+            self._active_device = active_dev
         self._apply_camera_night_mode()
         return True
 
     def _switch_camera(self) -> bool:
         """Release the current camera and open the one for the current mode.
 
-        If the requested night camera fails to open, fall back to the day
+        If the requested camera fails to open, fall back to the alternate
         camera so the system keeps running.
         """
         if self.is_recording:
@@ -537,6 +592,10 @@ class CCTVSystem:
             fps = self.night_device_fps
             save_defaults = False
             label = "night"
+            fallback_device: int | str | None = self.device
+            fallback_w, fallback_h, fallback_fps = self.width, self.height, self.fps
+            fallback_defaults = True
+            fallback_label = "day"
         else:
             target_device = self.device
             width = self.width
@@ -544,23 +603,29 @@ class CCTVSystem:
             fps = self.fps
             save_defaults = True
             label = "day"
+            fallback_device = self.night_device
+            fallback_w, fallback_h, fallback_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            fallback_defaults = False
+            fallback_label = "night"
 
         self._release_capture()
-        cap = self._open_device(
-            target_device, width, height, fps, save_defaults=save_defaults
-        )
+        cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
-        if cap is None and self.night_mode and self.night_device is not None:
-            logger.warning("Night camera failed to open; falling back to day camera.")
-            target_device = self.device
-            width = self.width
-            height = self.height
-            fps = self.fps
-            save_defaults = True
-            label = "day"
-            cap = self._open_device(
-                target_device, width, height, fps, save_defaults=save_defaults
+        if cap is None and fallback_device is not None:
+            logger.warning(
+                f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
             )
+            target_device = fallback_device
+            width = fallback_w
+            height = fallback_h
+            fps = fallback_fps
+            save_defaults = fallback_defaults
+            label = fallback_label
+            cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
         if cap is None:
             logger.error("Camera switch failed; waiting for reconnect loop.")
@@ -578,6 +643,7 @@ class CCTVSystem:
             if self.cap:
                 self.cap.release()
                 self.cap = None
+            self._prev_gray = None
 
     def _apply_camera_night_mode(self) -> None:
         """Try to tune V4L2 camera properties for low light.
@@ -633,7 +699,7 @@ class CCTVSystem:
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (self.blur_size, self.blur_size), 0)
 
-        if self._prev_gray is None:
+        if self._prev_gray is None or self._prev_gray.shape != gray.shape:
             self._prev_gray = gray
             return False
 
@@ -857,9 +923,7 @@ class CCTVSystem:
         if self._active_device == self.night_device and not self.night_software_enhance:
             return frame
 
-        profile = _NIGHT_MODE_PROFILES.get(
-            self.night_mode_strength, _NIGHT_MODE_PROFILES["normal"]
-        )
+        profile = _NIGHT_MODE_PROFILES.get(self.night_mode_strength, _NIGHT_MODE_PROFILES["normal"])
         gamma = float(profile["gamma"])
 
         lab: np.ndarray = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -1018,7 +1082,9 @@ class CCTVSystem:
                     continue
 
                 if response.status_code != 200:
-                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
                 result = response.json().get("result", {})
                 raw_message_id = result.get("message_id")
                 message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
@@ -1062,7 +1128,9 @@ class CCTVSystem:
                         backoff *= 2
                     continue
                 if response.status_code != 200:
-                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
                 result = response.json().get("result", {})
                 raw_message_id = result.get("message_id")
                 message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
@@ -1236,7 +1304,9 @@ class CCTVSystem:
                     time.sleep(5)
                     continue
                 if response.status_code != 200:
-                    logger.error(f"Telegram getUpdates error {response.status_code}: {response.text}")
+                    logger.error(
+                        f"Telegram getUpdates error {response.status_code}: {response.text}"
+                    )
                     time.sleep(5)
                     continue
 
@@ -1402,9 +1472,7 @@ class CCTVSystem:
     def _handle_telegram_delete_range(self, cmd: list[str], chat_id: str) -> None:
         try:
             if len(cmd) != 3:
-                self._send_telegram_message(
-                    "Usage: /delete_range <min_id> <max_id>", chat_id
-                )
+                self._send_telegram_message("Usage: /delete_range <min_id> <max_id>", chat_id)
                 return
 
             try:

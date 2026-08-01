@@ -48,6 +48,159 @@ async function loadStatus() {
   }
 }
 
+let allRecordings = [];
+let selectedDateStr = null;
+let currentCalendarDate = new Date();
+
+function formatDateKey(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getRecordingsByDateMap() {
+  const map = new Map();
+  allRecordings.forEach(r => {
+    const dt = new Date(r.created);
+    const key = formatDateKey(dt);
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key).push(r);
+  });
+  return map;
+}
+
+function renderCalendar() {
+  const monthYearEl = document.getElementById('calendar-month-year');
+  const daysEl = document.getElementById('calendar-days');
+  if (!daysEl || !monthYearEl) return;
+
+  const year = currentCalendarDate.getFullYear();
+  const month = currentCalendarDate.getMonth();
+
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  monthYearEl.textContent = `${monthNames[month]} ${year}`;
+
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const daysInPrevMonth = new Date(year, month, 0).getDate();
+
+  const recordingsByDate = getRecordingsByDateMap();
+  const todayKey = formatDateKey(new Date());
+
+  let html = '';
+
+  // Previous month trailing days
+  for (let i = firstDay - 1; i >= 0; i--) {
+    const dayNum = daysInPrevMonth - i;
+    html += `<div class="calendar-day other-month"><span class="day-num">${dayNum}</span></div>`;
+  }
+
+  // Current month days
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateObj = new Date(year, month, day);
+    const dateKey = formatDateKey(dateObj);
+    const dayRecordings = recordingsByDate.get(dateKey) || [];
+    const count = dayRecordings.length;
+    const hasRecs = count > 0;
+    const isSelected = dateKey === selectedDateStr;
+    const isToday = dateKey === todayKey;
+
+    let classes = ['calendar-day'];
+    if (hasRecs) classes.push('has-recordings');
+    if (isSelected) classes.push('selected-day');
+    if (isToday) classes.push('today');
+
+    let redIndicator = '';
+    if (hasRecs) {
+      redIndicator = `<span class="red-circle-badge" title="${count} recording(s)">${count}</span>`;
+    }
+
+    const clickAttr = hasRecs ? `onclick="selectCalendarDate('${dateKey}')"` : '';
+
+    html += `
+      <div class="${classes.join(' ')}" ${clickAttr} data-date="${dateKey}">
+        <span class="day-num">${day}</span>
+        ${redIndicator}
+      </div>
+    `;
+  }
+
+  // Next month leading days to complete full weeks
+  const totalCells = firstDay + daysInMonth;
+  const remainingCells = (7 - (totalCells % 7)) % 7;
+  for (let day = 1; day <= remainingCells; day++) {
+    html += `<div class="calendar-day other-month"><span class="day-num">${day}</span></div>`;
+  }
+
+  daysEl.innerHTML = html;
+}
+
+function changeMonth(delta) {
+  currentCalendarDate.setMonth(currentCalendarDate.getMonth() + delta);
+  renderCalendar();
+}
+
+function selectCalendarDate(dateKey) {
+  if (selectedDateStr === dateKey) {
+    selectedDateStr = null;
+  } else {
+    selectedDateStr = dateKey;
+  }
+  renderCalendar();
+  renderRecordingsList();
+}
+
+function clearDateFilter() {
+  selectedDateStr = null;
+  renderCalendar();
+  renderRecordingsList();
+}
+
+function renderRecordingsList() {
+  const list = document.getElementById('recordings');
+  const titleEl = document.getElementById('recordings-title');
+  const clearBtn = document.getElementById('clear-filter-btn');
+
+  document.getElementById('select-all').checked = false;
+  updateActionButtons();
+
+  let filtered = allRecordings;
+  if (selectedDateStr) {
+    filtered = allRecordings.filter(r => formatDateKey(new Date(r.created)) === selectedDateStr);
+    const dateFormatted = new Date(selectedDateStr + 'T00:00:00').toLocaleDateString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric'
+    });
+    if (titleEl) titleEl.textContent = `Recordings for ${dateFormatted} (${filtered.length})`;
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+  } else {
+    if (titleEl) titleEl.textContent = `Recordings (${allRecordings.length})`;
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+
+  if (filtered.length === 0) {
+    list.innerHTML = selectedDateStr
+      ? `<li class="empty">No recordings on ${selectedDateStr}.</li>`
+      : '<li class="empty">No recordings yet.</li>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(r => `
+    <li>
+      <input type="checkbox" class="rec-checkbox" value="${encodeURIComponent(r.filename)}" onchange="updateActionButtons()">
+      <div class="rec-info">
+        <a href="/recordings/${encodeURIComponent(r.filename)}" target="_blank">${r.filename}</a>
+        <div class="meta">${r.size_human} &bull; ${new Date(r.created).toLocaleString()}</div>
+      </div>
+    </li>
+  `).join('');
+}
+
 async function loadRecordings() {
   const list = document.getElementById('recordings');
   list.innerHTML = '<li class="empty">Loading…</li>';
@@ -56,19 +209,9 @@ async function loadRecordings() {
   try {
     const res = await fetch('/api/recordings');
     const data = await res.json();
-    if (!data.recordings || data.recordings.length === 0) {
-      list.innerHTML = '<li class="empty">No recordings yet.</li>';
-      return;
-    }
-    list.innerHTML = data.recordings.map(r => `
-      <li>
-        <input type="checkbox" class="rec-checkbox" value="${encodeURIComponent(r.filename)}" onchange="updateActionButtons()">
-        <div class="rec-info">
-          <a href="/recordings/${encodeURIComponent(r.filename)}" target="_blank">${r.filename}</a>
-          <div class="meta">${r.size_human} &bull; ${new Date(r.created).toLocaleString()}</div>
-        </div>
-      </li>
-    `).join('');
+    allRecordings = data.recordings || [];
+    renderCalendar();
+    renderRecordingsList();
   } catch (e) {
     list.innerHTML = '<li class="empty">Failed to load recordings.</li>';
   }

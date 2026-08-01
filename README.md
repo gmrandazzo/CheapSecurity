@@ -116,11 +116,11 @@ Edit `config.json`:
 | Section | Key | Description |
 |---------|-----|-------------|
 | `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) |
-| `camera` | `width`, `height`, `fps` | Capture resolution and frame rate |
+| `camera` | `width`, `height`, `fps` | Capture resolution and frame rate. Set `width` and `height` to `0` or `"auto"` to automatically detect and use the camera's maximum supported hardware resolution. |
 | `camera` | `night_mode` | Enable low-light enhancement / IR camera switching |
 | `camera` | `night_mode_strength` | Software enhancement strength: `low`, `normal`, or `aggressive` |
 | `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`). Set to `null` to use a single camera. |
-| `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera |
+| `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera (set `width`/`height` to `0` or `"auto"` for max resolution) |
 | `camera` | `night_software_enhance` | Apply CLAHE/gamma to the IR camera feed (`true`/`false`) |
 | `camera` | `night_mode_fps` | Target FPS in night mode (camera may ignore this) |
 | `camera` | `night_mode_gain` | Target analog gain in night mode (camera may ignore this) |

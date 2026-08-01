@@ -319,7 +319,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
         )
         sent = []
@@ -334,7 +335,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
         )
         system._store_telegram_message(100, "42", "video")
@@ -433,7 +435,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append(msg_id) or True,
         )
         sent = []
@@ -458,3 +461,36 @@ class TestTelegramMessageStore:
             {"message": {"text": "/delete_range 200 100", "chat": {"id": 42}}}
         )
         assert any("min_id must be <= max_id" in msg for msg in sent)
+
+    def test_detect_motion_handles_resolution_change(self, system):
+        frame_large = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        frame_small = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        expected_large_shape = (
+            int(1440 * system.motion_scale),
+            int(2560 * system.motion_scale),
+        )
+        expected_small_shape = (
+            int(720 * system.motion_scale),
+            int(1280 * system.motion_scale),
+        )
+
+        # First frame initializes _prev_gray
+        system._detect_motion(frame_large)
+        assert system._prev_gray is not None
+        assert system._prev_gray.shape == expected_large_shape
+
+        # Switching resolution should not crash cv2.absdiff
+        res = system._detect_motion(frame_small)
+        assert res is False
+        assert system._prev_gray.shape == expected_small_shape
+
+    def test_parse_dim(self, system):
+        assert system._parse_dim(0) == 0
+        assert system._parse_dim("0") == 0
+        assert system._parse_dim("auto") == 0
+        assert system._parse_dim("AUTO") == 0
+        assert system._parse_dim("max") == 0
+        assert system._parse_dim(1920) == 1920
+        assert system._parse_dim("1080") == 1080
+        assert system._parse_dim(None) == 0

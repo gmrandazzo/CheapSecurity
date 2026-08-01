@@ -81,7 +81,27 @@
     </section>
 
     <section class="card">
-      <h2>Recordings</h2>
+      <div class="card-header">
+        <h2>📅 Recordings Calendar</h2>
+        <div class="calendar-controls">
+          <button class="secondary-btn icon-btn" onclick="changeMonth(-1)">&lsaquo;</button>
+          <span id="calendar-month-year"></span>
+          <button class="secondary-btn icon-btn" onclick="changeMonth(1)">&rsaquo;</button>
+          <button id="clear-filter-btn" class="secondary-btn" onclick="clearDateFilter()" style="display:none;">Show All</button>
+        </div>
+      </div>
+      <div id="calendar-container">
+        <div class="calendar-weekdays">
+          <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+        </div>
+        <div id="calendar-days" class="calendar-days"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2 id="recordings-title">Recordings</h2>
+      </div>
       <div class="toolbar">
         <button id="refresh-btn" onclick="loadRecordings()">Refresh</button>
         <label class="toggle inline">
