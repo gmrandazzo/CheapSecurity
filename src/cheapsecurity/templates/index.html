@@ -86,6 +86,27 @@
         <input type="checkbox" id="auth-toggle" onchange="setAuth(this.checked)">
         <span>Built-in basic auth (disable if using nginx auth)</span>
       </label>
+      <hr style="border:0; border-top: 1px solid var(--border-color, rgba(255,255,255,0.1)); margin: 15px 0;">
+      <h3 style="margin: 0 0 10px 0; font-size: 0.95rem; color: var(--text-muted, #94a3b8);">🔒 Upload Encryption (AES-256 ZIP)</h3>
+      <div style="margin-bottom: 12px;">
+        <label style="display: block; font-size: 0.85rem; margin-bottom: 4px; color: var(--text-muted, #94a3b8);">AES Passphrase:</label>
+        <div style="display: flex; gap: 8px;">
+          <input type="password" id="enc-passphrase" placeholder="Enter secret passphrase" style="flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); color: #fff;">
+          <button class="btn btn-secondary" onclick="saveEncryptionPassphrase()">Save</button>
+        </div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="enc-telegram-toggle" onchange="setEncryptionToggle('telegram', this.checked)">
+        <span>🔒 Encrypt Telegram uploads & snapshots</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="enc-gdrive-toggle" onchange="setEncryptionToggle('google_drive', this.checked)">
+        <span>🔒 Encrypt Google Drive uploads</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="enc-onedrive-toggle" onchange="setEncryptionToggle('onedrive', this.checked)">
+        <span>🔒 Encrypt OneDrive uploads</span>
+      </label>
     </section>
 
     <section class="card">

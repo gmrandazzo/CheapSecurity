@@ -300,20 +300,20 @@ async function downloadSelected() {
   }
 }
 
-let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, gdrive_enabled: false, onedrive_enabled: false, auth_enabled: false };
+let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, gdrive_enabled: false, onedrive_enabled: false, auth_enabled: false, encryption_passphrase: '', encrypt_telegram: false, encrypt_gdrive: false, encrypt_onedrive: false };
 
 async function loadSettings() {
   try {
     const res = await fetch('/api/settings');
     const data = await res.json();
-    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.gdrive_enabled, data.onedrive_enabled, data.auth_enabled);
+    updateToggles(data.night_mode, data.night_mode_strength, data.night_device_active, data.night_device_configured, data.notifications_enabled, data.telegram_enabled, data.gdrive_enabled, data.onedrive_enabled, data.auth_enabled, data.encryption_passphrase, data.encrypt_telegram, data.encrypt_gdrive, data.encrypt_onedrive);
   } catch (e) {
     console.error('Failed to load settings', e);
   }
 }
 
-function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, gdrive, onedrive, auth) {
-  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, gdrive_enabled: gdrive, onedrive_enabled: onedrive, auth_enabled: auth };
+function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, gdrive, onedrive, auth, passphrase, encTel, encGDrive, encOneDrive) {
+  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, gdrive_enabled: gdrive, onedrive_enabled: onedrive, auth_enabled: auth, encryption_passphrase: passphrase || '', encrypt_telegram: encTel, encrypt_gdrive: encGDrive, encrypt_onedrive: encOneDrive };
   document.getElementById('night-toggle').checked = night;
   document.getElementById('night-strength').value = nightStrength || 'normal';
   document.getElementById('notif-toggle').checked = notifications;
@@ -321,6 +321,10 @@ function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfi
   if (document.getElementById('gdrive-toggle')) document.getElementById('gdrive-toggle').checked = Boolean(gdrive);
   if (document.getElementById('onedrive-toggle')) document.getElementById('onedrive-toggle').checked = Boolean(onedrive);
   document.getElementById('auth-toggle').checked = auth;
+  if (document.getElementById('enc-passphrase')) document.getElementById('enc-passphrase').value = passphrase || '';
+  if (document.getElementById('enc-telegram-toggle')) document.getElementById('enc-telegram-toggle').checked = Boolean(encTel);
+  if (document.getElementById('enc-gdrive-toggle')) document.getElementById('enc-gdrive-toggle').checked = Boolean(encGDrive);
+  if (document.getElementById('enc-onedrive-toggle')) document.getElementById('enc-onedrive-toggle').checked = Boolean(encOneDrive);
   updateNightCameraStatus();
 }
 
@@ -436,9 +440,43 @@ async function setAuth(enabled) {
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
-    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.gdrive_enabled, currentSettings.onedrive_enabled, data.auth_enabled);
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.gdrive_enabled, currentSettings.onedrive_enabled, data.auth_enabled, currentSettings.encryption_passphrase, currentSettings.encrypt_telegram, currentSettings.encrypt_gdrive, currentSettings.encrypt_onedrive);
   } catch (e) {
     alert('Failed to update auth setting');
+    loadSettings();
+  }
+}
+
+async function saveEncryptionPassphrase() {
+  const passphrase = document.getElementById('enc-passphrase').value;
+  try {
+    const res = await fetch('/api/settings/encryption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ passphrase })
+    });
+    const data = await res.json();
+    currentSettings.encryption_passphrase = data.encryption_passphrase;
+    alert('Encryption passphrase saved successfully.');
+  } catch (e) {
+    alert('Failed to save encryption passphrase.');
+    loadSettings();
+  }
+}
+
+async function setEncryptionToggle(key, enabled) {
+  const payload = {};
+  payload[key] = enabled;
+  try {
+    const res = await fetch('/api/settings/encryption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    updateToggles(currentSettings.night_mode, currentSettings.night_mode_strength, currentSettings.night_device_active, currentSettings.night_device_configured, currentSettings.notifications_enabled, currentSettings.telegram_enabled, currentSettings.gdrive_enabled, currentSettings.onedrive_enabled, currentSettings.auth_enabled, data.encryption_passphrase, data.encrypt_telegram, data.encrypt_gdrive, data.encrypt_onedrive);
+  } catch (e) {
+    alert('Failed to update encryption setting');
     loadSettings();
   }
 }

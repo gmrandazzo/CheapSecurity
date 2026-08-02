@@ -44,6 +44,7 @@ from typing import Any, Optional
 
 import cv2
 import numpy as np
+import pyzipper
 import requests
 
 from cheapsecurity.rtsp import RTSPPublisher
@@ -170,6 +171,13 @@ class CCTVSystem:
         self.onedrive_refresh_token = onedrive_cfg.get("refresh_token", "")
         self.onedrive_folder_path = onedrive_cfg.get("folder_path", "CheapSecurity")
 
+        # Encryption (AES-256 ZIP)
+        enc_cfg = self.cfg.get("encryption", {})
+        self.encryption_passphrase: str = enc_cfg.get("passphrase", "")
+        self.encrypt_telegram: bool = enc_cfg.get("telegram", False)
+        self.encrypt_gdrive: bool = enc_cfg.get("google_drive", False)
+        self.encrypt_onedrive: bool = enc_cfg.get("onedrive", False)
+
         self.cap: cv2.VideoCapture | None = None
         self.writer: cv2.VideoWriter | None = None
         self.recording_path: Path | None = None
@@ -288,6 +296,30 @@ class CCTVSystem:
         self.cfg.setdefault("cloud", {}).setdefault("onedrive", {})["enabled"] = enabled
         self._save_config()
         logger.info(f"OneDrive uploads {'enabled' if enabled else 'disabled'}")
+
+    def set_encryption_passphrase(self, passphrase: str) -> None:
+        self.encryption_passphrase = passphrase
+        self.cfg.setdefault("encryption", {})["passphrase"] = passphrase
+        self._save_config()
+        logger.info("Encryption passphrase updated.")
+
+    def set_encrypt_telegram(self, enabled: bool) -> None:
+        self.encrypt_telegram = enabled
+        self.cfg.setdefault("encryption", {})["telegram"] = enabled
+        self._save_config()
+        logger.info(f"Telegram encryption {'enabled' if enabled else 'disabled'}")
+
+    def set_encrypt_gdrive(self, enabled: bool) -> None:
+        self.encrypt_gdrive = enabled
+        self.cfg.setdefault("encryption", {})["google_drive"] = enabled
+        self._save_config()
+        logger.info(f"Google Drive encryption {'enabled' if enabled else 'disabled'}")
+
+    def set_encrypt_onedrive(self, enabled: bool) -> None:
+        self.encrypt_onedrive = enabled
+        self.cfg.setdefault("encryption", {})["onedrive"] = enabled
+        self._save_config()
+        logger.info(f"OneDrive encryption {'enabled' if enabled else 'disabled'}")
 
     @property
     def night_device_active(self) -> bool:
@@ -1084,9 +1116,90 @@ class CCTVSystem:
             return text
         return text.replace(self.telegram_token, "<TOKEN>")
 
+    def _create_aes_zip(self, source_path: Path, archive_name: str | None = None) -> Path:
+        """Compress source_path into an AES-256 encrypted .zip file.
+
+        Returns the path to the newly created .zip archive.
+        """
+        zip_name = (archive_name or source_path.stem) + ".zip"
+        zip_path = source_path.parent / zip_name
+        passphrase = (self.encryption_passphrase or "").encode("utf-8")
+
+        with pyzipper.AESZipFile(
+            zip_path,
+            "w",
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(passphrase)
+            zf.write(source_path, arcname=source_path.name)
+
+        return zip_path
+
+    def _send_telegram_document(self, doc_path: Path, chat_id: str, caption: str = "") -> None:
+        """Send a document (.zip file) to a Telegram chat."""
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendDocument"
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                with open(doc_path, "rb") as f:
+                    files: dict[str, Any] = {"document": (doc_path.name, f, "application/zip")}
+                    data = {"chat_id": chat_id, "caption": caption}
+                    response = requests.post(url, data=data, files=files, timeout=120)
+
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} sending document (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
+                result = response.json().get("result", {})
+                raw_message_id = result.get("message_id")
+                message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
+                if message_id is not None:
+                    self._store_telegram_message(
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        msg_type="document",
+                        caption=doc_path.name,
+                    )
+                logger.info(f"Telegram document sent: {doc_path.name}")
+                return
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram document send failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to send Telegram document: {self._redact_token(str(e))}")
+                return
+        logger.error(f"Failed to send Telegram document after {max_retries} attempts")
+
     def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
         target_chat = chat_id or self.telegram_chat_id
         if not target_chat:
+            return
+
+        if self.encrypt_telegram and self.encryption_passphrase:
+            zip_path: Path | None = None
+            try:
+                zip_path = self._create_aes_zip(video_path)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                caption = f"🔒 Encrypted Motion Video ({timestamp})\nFile: {zip_path.name}"
+                self._send_telegram_document(zip_path, target_chat, caption=caption)
+            finally:
+                if zip_path and zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
             return
 
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
@@ -1140,6 +1253,21 @@ class CCTVSystem:
         logger.error(f"Failed to send Telegram video after {max_retries} attempts")
 
     def _send_telegram_photo(self, image_bytes: bytes, chat_id: str, caption: str = "") -> None:
+        if self.encrypt_telegram and self.encryption_passphrase:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_jpg = self.record_dir / f"snapshot_{timestamp}.jpg"
+            zip_path: Path | None = None
+            try:
+                temp_jpg.write_bytes(image_bytes)
+                zip_path = self._create_aes_zip(temp_jpg, archive_name=f"snapshot_{timestamp}")
+                doc_caption = f"🔒 Encrypted Snapshot {caption}".strip()
+                self._send_telegram_document(zip_path, chat_id, caption=doc_caption)
+            finally:
+                temp_jpg.unlink(missing_ok=True)
+                if zip_path and zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
+            return
+
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
         files = {"photo": ("snapshot.jpg", image_bytes, "image/jpeg")}
         data = {"chat_id": chat_id, "caption": caption}
@@ -1431,6 +1559,34 @@ class CCTVSystem:
                     "Use /night_mode_off to disable.",
                     chat_id,
                 )
+        elif cmd[0] == "/encrypt_telegram_on":
+            self.set_encrypt_telegram(True)
+            self._send_telegram_message("Telegram upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_telegram_off":
+            self.set_encrypt_telegram(False)
+            self._send_telegram_message("Telegram upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encrypt_gdrive_on":
+            self.set_encrypt_gdrive(True)
+            self._send_telegram_message("Google Drive upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_gdrive_off":
+            self.set_encrypt_gdrive(False)
+            self._send_telegram_message("Google Drive upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encrypt_onedrive_on":
+            self.set_encrypt_onedrive(True)
+            self._send_telegram_message("OneDrive upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_onedrive_off":
+            self.set_encrypt_onedrive(False)
+            self._send_telegram_message("OneDrive upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encryption":
+            pass_set = "Set" if bool(self.encryption_passphrase) else "Not set!"
+            status_msg = (
+                f"🔒 Encryption Settings (AES-256 ZIP):\n"
+                f"- Passphrase: {pass_set}\n"
+                f"- Telegram: {'Enabled' if self.encrypt_telegram else 'Disabled'}\n"
+                f"- Google Drive: {'Enabled' if self.encrypt_gdrive else 'Disabled'}\n"
+                f"- OneDrive: {'Enabled' if self.encrypt_onedrive else 'Disabled'}"
+            )
+            self._send_telegram_message(status_msg, chat_id)
         elif cmd[0] == "/help":
             self._send_telegram_message(
                 "Available commands:\n"
@@ -1446,6 +1602,10 @@ class CCTVSystem:
                 "/night_mode_on /night_mode_off - enable or disable night mode\n"
                 "  (switches to the IR camera if one is configured)\n"
                 "/night_mode low|normal|aggressive - set night-mode enhancement strength\n"
+                "/encryption - show cloud & Telegram encryption status\n"
+                "/encrypt_telegram_on /off - toggle Telegram AES-256 encryption\n"
+                "/encrypt_gdrive_on /off - toggle Google Drive AES-256 encryption\n"
+                "/encrypt_onedrive_on /off - toggle OneDrive AES-256 encryption\n"
                 "/help - show this help",
                 chat_id,
             )
@@ -1605,6 +1765,12 @@ class CCTVSystem:
             logger.warning("Google Drive credentials not configured; skipping upload.")
             return False
 
+        target_file = video_path
+        temp_zip: Path | None = None
+        if self.encrypt_gdrive and self.encryption_passphrase:
+            temp_zip = self._create_aes_zip(video_path)
+            target_file = temp_zip
+
         try:
             token_url = "https://oauth2.googleapis.com/token"
             token_data = {
@@ -1626,20 +1792,21 @@ class CCTVSystem:
 
             upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
             headers = {"Authorization": f"Bearer {access_token}"}
-            metadata: dict[str, str | list[str]] = {"name": video_path.name}
+            metadata: dict[str, str | list[str]] = {"name": target_file.name}
             if self.gdrive_folder_id:
                 metadata["parents"] = [self.gdrive_folder_id]
 
-            with open(video_path, "rb") as f:
-                video_bytes = f.read()
+            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
+            with open(target_file, "rb") as f:
+                file_bytes = f.read()
             files: dict[str, Any] = {
                 "data": ("metadata", json.dumps(metadata), "application/json; charset=UTF-8"),
-                "file": (video_path.name, video_bytes, "video/avi"),
+                "file": (target_file.name, file_bytes, mime_type),
             }
             resp = requests.post(upload_url, headers=headers, files=files, timeout=300)
 
             if resp.status_code in (200, 201):
-                logger.info(f"Uploaded {video_path.name} to Google Drive.")
+                logger.info(f"Uploaded {target_file.name} to Google Drive.")
                 return True
             else:
                 logger.error(f"Google Drive upload failed: {resp.status_code} {resp.text}")
@@ -1647,12 +1814,21 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"Google Drive upload error: {e}")
             return False
+        finally:
+            if temp_zip and temp_zip.exists():
+                temp_zip.unlink(missing_ok=True)
 
     def _upload_to_onedrive(self, video_path: Path) -> bool:
         """Upload a video recording to OneDrive via Microsoft Graph REST API."""
         if not self.onedrive_refresh_token or not self.onedrive_client_id:
             logger.warning("OneDrive credentials not configured; skipping upload.")
             return False
+
+        target_file = video_path
+        temp_zip: Path | None = None
+        if self.encrypt_onedrive and self.encryption_passphrase:
+            temp_zip = self._create_aes_zip(video_path)
+            target_file = temp_zip
 
         try:
             token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -1675,19 +1851,20 @@ class CCTVSystem:
                 return False
 
             folder = self.onedrive_folder_path.strip("/")
-            filename = video_path.name
+            filename = target_file.name
             path_url = f"{folder}/{filename}" if folder else filename
             upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{path_url}:/content"
 
+            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
             headers = {
                 "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/octet-stream",
+                "Content-Type": mime_type,
             }
-            with open(video_path, "rb") as f:
+            with open(target_file, "rb") as f:
                 resp = requests.put(upload_url, headers=headers, data=f, timeout=300)
 
             if resp.status_code in (200, 201):
-                logger.info(f"Uploaded {video_path.name} to OneDrive.")
+                logger.info(f"Uploaded {target_file.name} to OneDrive.")
                 return True
             else:
                 logger.error(f"OneDrive upload failed: {resp.status_code} {resp.text}")
@@ -1695,6 +1872,9 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"OneDrive upload error: {e}")
             return False
+        finally:
+            if temp_zip and temp_zip.exists():
+                temp_zip.unlink(missing_ok=True)
 
     def _maybe_upload_cloud(self, video_path: Path) -> None:
         """Trigger background cloud uploads if enabled."""

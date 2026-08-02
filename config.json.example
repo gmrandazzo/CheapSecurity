@@ -70,6 +70,12 @@
       "folder_path": "CheapSecurity"
     }
   },
+  "encryption": {
+    "passphrase": "YOUR_SECRET_AES_PASSPHRASE",
+    "telegram": false,
+    "google_drive": false,
+    "onedrive": false
+  },
   "rtsp": {
     "enabled": false,
     "port": 8554,

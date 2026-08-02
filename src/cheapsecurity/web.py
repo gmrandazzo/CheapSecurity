@@ -621,6 +621,10 @@ def api_settings() -> RouteReturn:
             "telegram_enabled": cctv.telegram_enabled,
             "gdrive_enabled": cctv.gdrive_enabled,
             "onedrive_enabled": cctv.onedrive_enabled,
+            "encryption_passphrase": cctv.encryption_passphrase,
+            "encrypt_telegram": cctv.encrypt_telegram,
+            "encrypt_gdrive": cctv.encrypt_gdrive,
+            "encrypt_onedrive": cctv.encrypt_onedrive,
             "auth_enabled": cctv.cfg.get("web", {}).get("auth", {}).get("enabled", False),
         }
     )
@@ -729,6 +733,56 @@ def api_set_onedrive() -> RouteReturn:
     enabled = bool(data.get("enabled", cctv.onedrive_enabled))
     cctv.set_onedrive_enabled(enabled)
     return jsonify({"onedrive_enabled": enabled})
+
+
+@app.route("/api/settings/encryption", methods=["POST"])
+def api_set_encryption() -> RouteReturn:
+    """Update encryption settings (passphrase and per-channel toggles).
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            passphrase: {type: string, example: "mysecret123"}
+            telegram: {type: boolean, example: true}
+            google_drive: {type: boolean, example: true}
+            onedrive: {type: boolean, example: true}
+    responses:
+      200:
+        description: New encryption settings
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+
+    if "passphrase" in data:
+        cctv.set_encryption_passphrase(str(data["passphrase"]))
+    if "telegram" in data:
+        cctv.set_encrypt_telegram(bool(data["telegram"]))
+    if "google_drive" in data:
+        cctv.set_encrypt_gdrive(bool(data["google_drive"]))
+    if "onedrive" in data:
+        cctv.set_encrypt_onedrive(bool(data["onedrive"]))
+
+    return jsonify(
+        {
+            "encryption_passphrase": cctv.encryption_passphrase,
+            "encrypt_telegram": cctv.encrypt_telegram,
+            "encrypt_gdrive": cctv.encrypt_gdrive,
+            "encrypt_onedrive": cctv.encrypt_onedrive,
+        }
+    )
 
 
 @app.route("/api/settings/night_mode", methods=["POST"])

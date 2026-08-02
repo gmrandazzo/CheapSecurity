@@ -25,10 +25,14 @@ Key Features
 - **Cloud Storage Integration**:
   - Direct auto-upload of motion recordings to **Google Drive** (via Google Drive API v3)
   - Direct auto-upload of motion recordings to **OneDrive** (via Microsoft Graph API)
+- **AES-256 ZIP Upload Encryption**:
+  - Independently encrypt video clips and snapshots before uploading to Telegram, Google Drive, or OneDrive
+  - Password-protected `.zip` format opens natively on iOS (Files app), Android, macOS, and Windows
+  - Manage encryption passphrase and per-channel toggles from dashboard or Telegram bot
 - **Email alerts** with a snapshot picture when motion starts
 - **Telegram integration**:
-  - Automatic video upload after motion is recorded
-  - Bot commands: `/snapshot`, `/video <seconds>`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
+  - Automatic video upload after motion is recorded (supports AES-256 encrypted `.zip` delivery)
+  - Bot commands: `/snapshot`, `/video <seconds>`, `/encryption`, `/encrypt_telegram_on/off`, `/encrypt_gdrive_on/off`, `/encrypt_onedrive_on/off`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
 - **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost, with optional second IR/night camera)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
 - **Interactive Swagger UI** at `/api/` for the REST API

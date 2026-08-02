@@ -18,6 +18,7 @@ dependencies = [
     "werkzeug>=2.0.0",
     "gunicorn>=21.0.0",
     "requests>=2.25.0",
+    "pyzipper>=0.3.6",
     # OpenCV must be installed manually on the target ARM board.
     # Verify with: python3 -c "import cv2; print(cv2.__version__)"
 ]

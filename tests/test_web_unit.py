@@ -5,6 +5,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+
 from cheapsecurity.web import app
 
 
