@@ -153,6 +153,10 @@ Edit `config.json`:
 | `telegram` | `poll_commands` | Enable `/snapshot`, `/video`, and `/help` bot commands |
 | `cloud` | `google_drive` | Google Drive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, optional `folder_id`) |
 | `cloud` | `onedrive` | Microsoft OneDrive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, `folder_path`) |
+| `encryption` | `passphrase` | Secret passphrase used to encrypt ZIP archives (AES-256) |
+| `encryption` | `telegram` | Enable AES-256 ZIP encryption for Telegram uploads & snapshots (`true`/`false`) |
+| `encryption` | `google_drive` | Enable AES-256 ZIP encryption for Google Drive uploads (`true`/`false`) |
+| `encryption` | `onedrive` | Enable AES-256 ZIP encryption for OneDrive uploads (`true`/`false`) |
 | `storage` | `max_age_days` | Delete recordings older than this (default 3 days = 72h) |
 | `storage` | `max_size_gb` | Delete oldest files if total exceeds this |
 | `storage` | `cleanup_interval_minutes` | How often storage cleanup runs |
@@ -235,7 +239,39 @@ The bot only responds to your configured `chat_id`.
 
 **Motion has priority:** if the system is already recording because motion was detected, a `/video` request will not interrupt it. The bot will reply that a motion video is in progress and will be uploaded automatically.
 
-**Deleting messages and cloud cache:** Telegram bots cannot purge Telegram’s master cloud storage directly. When you delete a message, the media file becomes orphaned and is eventually garbage-collected by Telegram. Only messages sent by this bot after this feature is enabled are tracked; older messages do not have stored IDs and cannot be deleted this way.
+## AES-256 Upload Encryption
+
+CheapSecurity allows you to encrypt video clips and snapshots before uploading them to public channels (**Telegram**, **Google Drive**, or **OneDrive**).
+
+Files are packaged into standard password-protected `.zip` archives using **AES-256 encryption**.
+
+### Behavior Summary
+
+| Channel | Encryption ON (Passphrase set) | Encryption OFF |
+| :--- | :--- | :--- |
+| **Telegram Snapshots (`/snapshot`)** | Sent as AES-256 `.zip` file (`snapshot_TIMESTAMP.zip`) | Sent as normal `.jpg` photo |
+| **Telegram Videos (`/video` & motion)** | Sent as AES-256 `.zip` file (`motion_TIMESTAMP.zip`) | Sent as normal `.mp4`/`.avi` video |
+| **Google Drive Uploads** | Uploaded as AES-256 `.zip` file | Uploaded as normal `.avi` video |
+| **OneDrive Uploads** | Uploaded as AES-256 `.zip` file | Uploaded as normal `.avi` video |
+| **Local Odroid Footage** | Saved unencrypted on Odroid for fast dashboard playback | Saved unencrypted on Odroid for fast dashboard playback |
+
+### Unencrypting & Playing Media on Your Devices
+
+When encryption is enabled, downloaded files are standard password-protected `.zip` archives. **No extra software or web apps are required!**
+
+- **iPhone (iOS)**: Tap the `.zip` file in Telegram or the iOS Files app, enter your passphrase when prompted, and tap the unzipped `.mp4` or `.jpg` to view natively.
+- **Android**: Tap the `.zip` file in Files by Google or your file manager, enter your passphrase, and extract to view.
+- **Mac / Windows / Linux**: Double-click the `.zip` file (or use 7-Zip, WinRAR, Keka, or macOS Archive Utility), enter your passphrase, and play the unencrypted video.
+
+### Managing Encryption via Telegram Bot
+
+You can check and toggle upload encryption on the fly using Telegram bot commands:
+- `/encryption` — Show current passphrase status and channel encryption state.
+- `/encrypt_telegram_on` / `/encrypt_telegram_off` — Toggle Telegram AES-256 encryption.
+- `/encrypt_gdrive_on` / `/encrypt_gdrive_off` — Toggle Google Drive AES-256 encryption.
+- `/encrypt_onedrive_on` / `/encrypt_onedrive_off` — Toggle OneDrive AES-256 encryption.
+
+---
 
 ## Email alerts
 
