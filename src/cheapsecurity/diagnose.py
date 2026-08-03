@@ -7,13 +7,14 @@ Helps troubleshoot why recordings are not being created.
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
 import cv2
 
 
-def main() -> None:
+def main() -> int:
     print("=" * 60)
     print("CheapSecurity Diagnostics")
     print("=" * 60)
@@ -25,7 +26,7 @@ def main() -> None:
         print("\n✓ config.json loaded")
     except Exception as e:
         print(f"\n✗ Failed to load config.json: {e}")
-        return
+        return 1
 
     cam_cfg = cfg["camera"]
     motion_cfg = cfg["motion"]
@@ -64,7 +65,7 @@ def main() -> None:
         cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         print("✗ Cannot open camera")
-        return
+        return 1
 
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg["width"])
@@ -125,7 +126,8 @@ def main() -> None:
 
     cap.release()
     print("\nDiagnostics complete.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

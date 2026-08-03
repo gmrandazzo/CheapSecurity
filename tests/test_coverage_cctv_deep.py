@@ -210,8 +210,9 @@ def test_send_alert_email(mock_smtp, cctv_sys):
     assert mock_instance.sendmail.called
 
 
+@patch("requests.put")
 @patch("requests.post")
-def test_gdrive_upload_success_and_error_handling(mock_post, cctv_sys, tmp_path):
+def test_gdrive_upload_success_and_error_handling(mock_post, mock_put, cctv_sys, tmp_path):
     dummy_video = tmp_path / "motion_test.avi"
     dummy_video.write_bytes(b"HEADER_AND_VIDEO_DATA")
 
@@ -220,27 +221,35 @@ def test_gdrive_upload_success_and_error_handling(mock_post, cctv_sys, tmp_path)
     cctv_sys.gdrive_refresh_token = "ref"
     cctv_sys.encrypt_gdrive = False
 
-    # Token success, upload success
+    # Token success, resumable session success, upload success
     token_resp = MagicMock()
     token_resp.status_code = 200
     token_resp.json.return_value = {"access_token": "ACCESS_123"}
 
+    init_resp = MagicMock()
+    init_resp.status_code = 200
+    init_resp.headers = {"Location": "https://upload.example.com/resumable"}
+
     upload_resp = MagicMock()
     upload_resp.status_code = 200
 
-    mock_post.side_effect = [token_resp, upload_resp]
+    mock_post.side_effect = [token_resp, init_resp]
+    mock_put.return_value = upload_resp
 
     res = cctv_sys._upload_to_gdrive(dummy_video)
     assert res is True
+    assert mock_put.called
 
     # Token error response
     err_resp = MagicMock()
     err_resp.status_code = 400
     err_resp.text = "invalid grant"
     mock_post.side_effect = [err_resp]
+    mock_put.reset_mock()
 
     res_err = cctv_sys._upload_to_gdrive(dummy_video)
     assert res_err is False
+    assert not mock_put.called
 
 
 @patch("requests.post")

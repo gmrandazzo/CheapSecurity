@@ -17,6 +17,7 @@
  */
 
 let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, auth_enabled: false };
+const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
 
 async function loadStatus() {
   try {
@@ -240,7 +241,7 @@ async function deleteSelected() {
   try {
     const res = await fetch('/api/recordings/delete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ filenames })
     });
     const data = await res.json();
@@ -261,7 +262,7 @@ async function sendSelectedToTelegram() {
   try {
     const res = await fetch('/api/recordings/telegram', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ filenames })
     });
     const data = await res.json();
@@ -282,7 +283,7 @@ async function downloadSelected() {
   try {
     const res = await fetch('/api/recordings/download', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ filenames })
     });
     if (!res.ok) throw new Error('Download failed');
@@ -360,7 +361,7 @@ async function setNightMode(enabled) {
     const strength = document.getElementById('night-strength').value;
     const res = await fetch('/api/settings/night_mode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled, strength })
     });
     const data = await res.json();
@@ -376,7 +377,7 @@ async function setNightModeStrength(strength) {
     const enabled = document.getElementById('night-toggle').checked;
     const res = await fetch('/api/settings/night_mode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled, strength })
     });
     const data = await res.json();
@@ -391,7 +392,7 @@ async function setTelegram(enabled) {
   try {
     const res = await fetch('/api/settings/telegram', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -406,7 +407,7 @@ async function setNotifications(enabled) {
   try {
     const res = await fetch('/api/settings/notifications', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -421,7 +422,7 @@ async function setGDrive(enabled) {
   try {
     const res = await fetch('/api/settings/gdrive', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -436,7 +437,7 @@ async function setOneDrive(enabled) {
   try {
     const res = await fetch('/api/settings/onedrive', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -451,7 +452,7 @@ async function setAuth(enabled) {
   try {
     const res = await fetch('/api/settings/auth', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ enabled })
     });
     const data = await res.json();
@@ -467,7 +468,7 @@ async function saveEncryptionPassphrase() {
   try {
     const res = await fetch('/api/settings/encryption', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ passphrase })
     });
     const data = await res.json();
@@ -485,7 +486,7 @@ async function setEncryptionToggle(key, enabled) {
   try {
     const res = await fetch('/api/settings/encryption', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify(payload)
     });
     const data = await res.json();

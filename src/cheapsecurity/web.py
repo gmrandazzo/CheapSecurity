@@ -25,6 +25,7 @@ and direct playback/download links.
 import base64
 import contextlib
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -45,11 +46,13 @@ from flask import (
     request,
     send_file,
     send_from_directory,
+    session,
 )
 
 from cheapsecurity.cctv import CCTVSystem
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
 Swagger(
     app,
     template={
@@ -135,17 +138,26 @@ def require_auth() -> Response | None:
 _CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _get_csrf_token() -> str:
+    """Return the current session's CSRF token, creating one if needed."""
+    token = session.get("csrf_token")
+    if token is None:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
 @app.before_request
 def require_csrf() -> Response | None:
     if request.method in _CSRF_SAFE_METHODS:
         return None
+    # Accept a per-session CSRF token (used by the dashboard)...
+    if request.headers.get("X-CSRF-Token") == _get_csrf_token():
+        return None
+    # ...or the standard XMLHttpRequest header (used by API clients/tests).
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return None
-    # Allow requests originating from the Swagger UI page.
-    referrer = request.referrer or ""
-    if "/api/" in referrer:
-        return None
-    resp = make_response(jsonify({"error": "CSRF protection: missing X-Requested-With header"}))
+    resp = make_response(jsonify({"error": "CSRF protection: missing or invalid token"}))
     resp.status_code = 403
     return resp
 
@@ -153,7 +165,27 @@ def require_csrf() -> Response | None:
 @app.route("/")
 def index() -> str:
     cfg = cctv.cfg if cctv else {}
-    return str(render_template("index.html", cfg=cfg))
+    return str(render_template("index.html", cfg=cfg, csrf_token=_get_csrf_token()))
+
+
+@app.route("/api/csrf")
+def api_csrf() -> RouteReturn:
+    """Return the current session CSRF token for API clients.
+    ---
+    tags:
+      - auth
+    security:
+      - basicAuth: []
+    responses:
+      200:
+        description: CSRF token
+        schema:
+          type: object
+          properties:
+            csrf_token:
+              type: string
+    """
+    return jsonify({"csrf_token": _get_csrf_token()})
 
 
 @app.route("/api/status")

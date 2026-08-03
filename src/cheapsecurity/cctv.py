@@ -1790,20 +1790,38 @@ class CCTVSystem:
                 logger.error("No access_token returned from Google Drive OAuth.")
                 return False
 
-            upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
-            headers = {"Authorization": f"Bearer {access_token}"}
-            metadata: dict[str, str | list[str]] = {"name": target_file.name}
+            # Use a resumable upload so the file can be streamed instead of
+            # loading the whole clip into memory on small boards.
+            upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
+            metadata: dict[str, Any] = {"name": target_file.name}
             if self.gdrive_folder_id:
                 metadata["parents"] = [self.gdrive_folder_id]
 
-            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
-            with open(target_file, "rb") as f:
-                file_bytes = f.read()
-            files: dict[str, Any] = {
-                "data": ("metadata", json.dumps(metadata), "application/json; charset=UTF-8"),
-                "file": (target_file.name, file_bytes, mime_type),
+            init_headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
             }
-            resp = requests.post(upload_url, headers=headers, files=files, timeout=300)
+            init_resp = requests.post(
+                upload_url, headers=init_headers, data=json.dumps(metadata), timeout=30
+            )
+            if init_resp.status_code != 200:
+                logger.error(
+                    f"Google Drive resumable session failed: {init_resp.status_code} {init_resp.text}"
+                )
+                return False
+            location = init_resp.headers.get("Location")
+            if not location:
+                logger.error("Google Drive resumable session returned no Location header.")
+                return False
+
+            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
+            file_size = target_file.stat().st_size
+            upload_headers = {
+                "Content-Length": str(file_size),
+                "Content-Type": mime_type,
+            }
+            with open(target_file, "rb") as f:
+                resp = requests.put(location, headers=upload_headers, data=f, timeout=300)
 
             if resp.status_code in (200, 201):
                 logger.info(f"Uploaded {target_file.name} to Google Drive.")
