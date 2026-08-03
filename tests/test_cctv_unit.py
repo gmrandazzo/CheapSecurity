@@ -33,6 +33,32 @@ class TestCCTVSystemInit:
         assert Path(cfg["recording"]["dir"]).exists()
 
 
+class TestEnvSecretOverrides:
+    def test_env_overrides_secrets(self, config_dict, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(config_dict))
+        monkeypatch.setattr(
+            "cv2.VideoCapture", lambda *args, **kwargs: FakeCapture()
+        )
+        monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_BOT_TOKEN", "env_token")
+        monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_CHAT_ID", "env_chat_id")
+        monkeypatch.setenv("CHEAPSECURITY_SMTP_PASSWORD", "env_smtp_pass")
+        monkeypatch.setenv("CHEAPSECURITY_GDRIVE_REFRESH_TOKEN", "env_gdrive_refresh")
+        monkeypatch.setenv("CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN", "env_onedrive_refresh")
+        monkeypatch.setenv("CHEAPSECURITY_ENCRYPTION_PASSPHRASE", "env_passphrase")
+        monkeypatch.setenv("CHEAPSECURITY_WEB_AUTH_PASSWORD", "env_web_pass")
+
+        system = CCTVSystem(str(config_path))
+        assert system.telegram_token == "env_token"
+        assert system.telegram_chat_id == "env_chat_id"
+        assert system.smtp_cfg["password"] == "env_smtp_pass"
+        assert system.gdrive_refresh_token == "env_gdrive_refresh"
+        assert system.onedrive_refresh_token == "env_onedrive_refresh"
+        assert system.encryption_passphrase == "env_passphrase"
+        assert system.cfg["web"]["auth"]["password"] == "env_web_pass"
+        system.stop()
+
+
 class TestNightMode:
     def test_no_op_when_disabled(self, system):
         frame = np.ones((10, 10, 3), dtype=np.uint8) * 128

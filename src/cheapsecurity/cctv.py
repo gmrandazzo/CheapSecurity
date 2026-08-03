@@ -26,6 +26,7 @@ for the web interface.
 import contextlib
 import json
 import logging
+import os
 import shutil
 import smtplib
 import ssl
@@ -178,6 +179,8 @@ class CCTVSystem:
         self.encrypt_gdrive: bool = enc_cfg.get("google_drive", False)
         self.encrypt_onedrive: bool = enc_cfg.get("onedrive", False)
 
+        self._load_env_secrets()
+
         self.cap: cv2.VideoCapture | None = None
         self.writer: cv2.VideoWriter | None = None
         self.recording_path: Path | None = None
@@ -216,6 +219,55 @@ class CCTVSystem:
         pre_size = int(self.measured_fps * self.pre_buffer_seconds)
         self._pre_buffer: deque = deque(maxlen=max(pre_size, 1))
         self._prev_gray: np.ndarray | None = None
+
+    def _load_env_secrets(self) -> None:
+        """Override sensitive config values with environment variables.
+
+        Environment-supplied secrets take precedence over config.json and are
+        never written back to disk. Leave the config file entries empty or set
+        them to dummy values when using this feature.
+        """
+        self.telegram_token = os.environ.get(
+            "CHEAPSECURITY_TELEGRAM_BOT_TOKEN", self.telegram_token
+        )
+        self.telegram_chat_id = os.environ.get(
+            "CHEAPSECURITY_TELEGRAM_CHAT_ID", self.telegram_chat_id
+        )
+
+        smtp_password = os.environ.get("CHEAPSECURITY_SMTP_PASSWORD")
+        if smtp_password:
+            self.smtp_cfg = dict(self.smtp_cfg)
+            self.smtp_cfg["password"] = smtp_password
+
+        self.gdrive_client_id = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_CLIENT_ID", self.gdrive_client_id
+        )
+        self.gdrive_client_secret = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_CLIENT_SECRET", self.gdrive_client_secret
+        )
+        self.gdrive_refresh_token = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_REFRESH_TOKEN", self.gdrive_refresh_token
+        )
+
+        self.onedrive_client_id = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_CLIENT_ID", self.onedrive_client_id
+        )
+        self.onedrive_client_secret = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_CLIENT_SECRET", self.onedrive_client_secret
+        )
+        self.onedrive_refresh_token = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN", self.onedrive_refresh_token
+        )
+
+        self.encryption_passphrase = os.environ.get(
+            "CHEAPSECURITY_ENCRYPTION_PASSPHRASE", self.encryption_passphrase
+        )
+
+        web_auth_password = os.environ.get("CHEAPSECURITY_WEB_AUTH_PASSWORD")
+        if web_auth_password:
+            self.cfg.setdefault("web", {}).setdefault("auth", {})[
+                "password"
+            ] = web_auth_password
 
     # ------------------------------------------------------------------
     # Public API

@@ -174,6 +174,51 @@ Edit `config.json`:
 | `web` | `stream_scale` | Downscale factor for live stream (saves bandwidth/CPU) |
 | `web.auth` | `enabled`, `username`, `password` | Optional HTTP Basic Auth |
 
+## Keeping secrets out of `config.json`
+
+By default all credentials live in `config.json`. The file is created with restrictive (`0o600`) permissions, but you can keep the actual secrets off disk by supplying them through environment variables. Environment values take precedence over the config file and are **never written back to disk**.
+
+| Secret | Environment variable |
+|--------|----------------------|
+| Telegram bot token | `CHEAPSECURITY_TELEGRAM_BOT_TOKEN` |
+| Telegram chat ID | `CHEAPSECURITY_TELEGRAM_CHAT_ID` |
+| SMTP password | `CHEAPSECURITY_SMTP_PASSWORD` |
+| Google Drive client ID | `CHEAPSECURITY_GDRIVE_CLIENT_ID` |
+| Google Drive client secret | `CHEAPSECURITY_GDRIVE_CLIENT_SECRET` |
+| Google Drive refresh token | `CHEAPSECURITY_GDRIVE_REFRESH_TOKEN` |
+| OneDrive client ID | `CHEAPSECURITY_ONEDRIVE_CLIENT_ID` |
+| OneDrive client secret | `CHEAPSECURITY_ONEDRIVE_CLIENT_SECRET` |
+| OneDrive refresh token | `CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN` |
+| ZIP encryption passphrase | `CHEAPSECURITY_ENCRYPTION_PASSPHRASE` |
+| Web dashboard password | `CHEAPSECURITY_WEB_AUTH_PASSWORD` |
+
+Example with a systemd unit:
+
+```ini
+[Service]
+Environment="CHEAPSECURITY_TELEGRAM_BOT_TOKEN=123456:ABC..."
+Environment="CHEAPSECURITY_ENCRYPTION_PASSPHRASE=your-strong-passphrase"
+EnvironmentFile=-/etc/cheapsecurity.env
+```
+
+### Hardening the systemd service
+
+Even with secrets in the environment, the backend still runs as a normal user. You can sandbox it so a compromised process has very limited filesystem access:
+
+```ini
+[Service]
+User=cheapsecurity
+Group=cheapsecurity
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/home/cheapsecurity/CheapSecurity/recordings
+BindReadOnlyPaths=/home/cheapsecurity/CheapSecurity/config.json
+```
+
+This confines the app to its recordings directory and read-only access to `config.json`. **Note:** if the attacker gains root or the service-user account, they can still read anything that user can read, including environment variables and credential files. For strongest protection, run behind an HTTPS reverse proxy on a trusted LAN and keep the OS up to date.
+
 ## Telegram setup
 
 ### 1. Create a bot

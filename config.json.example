@@ -36,7 +36,7 @@
       "server": "smtp.gmail.com",
       "port": 465,
       "username": "you@gmail.com",
-      "password": "your_gmail_app_password",
+      "password": "",
       "use_tls": true
     },
     "from": "you@gmail.com",
@@ -48,8 +48,8 @@
   },
   "telegram": {
     "enabled": false,
-    "bot_token": "123456789:YOUR_BOT_TOKEN_HERE",
-    "chat_id": "YOUR_CHAT_ID_HERE",
+    "bot_token": "",
+    "chat_id": "",
     "send_video": true,
     "min_interval_minutes": 5,
     "poll_commands": true
@@ -57,21 +57,21 @@
   "cloud": {
     "google_drive": {
       "enabled": false,
-      "client_id": "YOUR_GDRIVE_CLIENT_ID",
-      "client_secret": "YOUR_GDRIVE_CLIENT_SECRET",
-      "refresh_token": "YOUR_GDRIVE_REFRESH_TOKEN",
+      "client_id": "",
+      "client_secret": "",
+      "refresh_token": "",
       "folder_id": "OPTIONAL_GDRIVE_FOLDER_ID"
     },
     "onedrive": {
       "enabled": false,
-      "client_id": "YOUR_ONEDRIVE_CLIENT_ID",
-      "client_secret": "YOUR_ONEDRIVE_CLIENT_SECRET",
-      "refresh_token": "YOUR_ONEDRIVE_REFRESH_TOKEN",
+      "client_id": "",
+      "client_secret": "",
+      "refresh_token": "",
       "folder_path": "CheapSecurity"
     }
   },
   "encryption": {
-    "passphrase": "YOUR_SECRET_AES_PASSPHRASE",
+    "passphrase": "",
     "telegram": false,
     "google_drive": false,
     "onedrive": false
