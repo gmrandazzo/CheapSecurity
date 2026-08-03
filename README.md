@@ -136,6 +136,7 @@ Edit `config.json`:
 | `camera` | `night_mode_contrast` | Contrast boost in night mode |
 | `motion` | `threshold` | Pixel difference threshold (0-255) |
 | `motion` | `min_area` | Minimum contour area to trigger motion (full-res pixels) |
+| `motion` | `blur_size` | Gaussian blur kernel size for noise reduction (odd number) |
 | `motion` | `cooldown_seconds` | Keep recording after motion stops |
 | `motion` | `scale` | Downscale factor for motion detection (saves CPU) |
 | `recording` | `dir` | Where videos are saved |

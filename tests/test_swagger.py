@@ -3,7 +3,6 @@
 import json
 
 import pytest
-
 from cheapsecurity.web import app
 
 

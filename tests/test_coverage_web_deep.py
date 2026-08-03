@@ -2,9 +2,8 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 import cheapsecurity.web as web_module
+import pytest
 
 
 @pytest.fixture

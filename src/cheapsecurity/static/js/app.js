@@ -313,18 +313,33 @@ async function loadSettings() {
 }
 
 function updateToggles(night, nightStrength, nightDeviceActive, nightDeviceConfigured, notifications, telegram, gdrive, onedrive, auth, passphrase, encTel, encGDrive, encOneDrive) {
-  currentSettings = { night_mode: night, night_mode_strength: nightStrength, night_device_active: nightDeviceActive, night_device_configured: nightDeviceConfigured, notifications_enabled: notifications, telegram_enabled: telegram, gdrive_enabled: gdrive, onedrive_enabled: onedrive, auth_enabled: auth, encryption_passphrase: passphrase || '', encrypt_telegram: encTel, encrypt_gdrive: encGDrive, encrypt_onedrive: encOneDrive };
-  document.getElementById('night-toggle').checked = night;
-  document.getElementById('night-strength').value = nightStrength || 'normal';
-  document.getElementById('notif-toggle').checked = notifications;
-  document.getElementById('telegram-toggle').checked = telegram;
-  if (document.getElementById('gdrive-toggle')) document.getElementById('gdrive-toggle').checked = Boolean(gdrive);
-  if (document.getElementById('onedrive-toggle')) document.getElementById('onedrive-toggle').checked = Boolean(onedrive);
-  document.getElementById('auth-toggle').checked = auth;
-  if (document.getElementById('enc-passphrase')) document.getElementById('enc-passphrase').value = passphrase || '';
-  if (document.getElementById('enc-telegram-toggle')) document.getElementById('enc-telegram-toggle').checked = Boolean(encTel);
-  if (document.getElementById('enc-gdrive-toggle')) document.getElementById('enc-gdrive-toggle').checked = Boolean(encGDrive);
-  if (document.getElementById('enc-onedrive-toggle')) document.getElementById('enc-onedrive-toggle').checked = Boolean(encOneDrive);
+  const next = { ...currentSettings };
+  if (night !== undefined) next.night_mode = night;
+  if (nightStrength !== undefined) next.night_mode_strength = nightStrength;
+  if (nightDeviceActive !== undefined) next.night_device_active = nightDeviceActive;
+  if (nightDeviceConfigured !== undefined) next.night_device_configured = nightDeviceConfigured;
+  if (notifications !== undefined) next.notifications_enabled = notifications;
+  if (telegram !== undefined) next.telegram_enabled = telegram;
+  if (gdrive !== undefined) next.gdrive_enabled = gdrive;
+  if (onedrive !== undefined) next.onedrive_enabled = onedrive;
+  if (auth !== undefined) next.auth_enabled = auth;
+  if (passphrase !== undefined) next.encryption_passphrase = passphrase || '';
+  if (encTel !== undefined) next.encrypt_telegram = encTel;
+  if (encGDrive !== undefined) next.encrypt_gdrive = encGDrive;
+  if (encOneDrive !== undefined) next.encrypt_onedrive = encOneDrive;
+  currentSettings = next;
+
+  document.getElementById('night-toggle').checked = next.night_mode;
+  document.getElementById('night-strength').value = next.night_mode_strength || 'normal';
+  document.getElementById('notif-toggle').checked = next.notifications_enabled;
+  document.getElementById('telegram-toggle').checked = next.telegram_enabled;
+  if (document.getElementById('gdrive-toggle')) document.getElementById('gdrive-toggle').checked = Boolean(next.gdrive_enabled);
+  if (document.getElementById('onedrive-toggle')) document.getElementById('onedrive-toggle').checked = Boolean(next.onedrive_enabled);
+  document.getElementById('auth-toggle').checked = next.auth_enabled;
+  if (document.getElementById('enc-passphrase')) document.getElementById('enc-passphrase').value = next.encryption_passphrase;
+  if (document.getElementById('enc-telegram-toggle')) document.getElementById('enc-telegram-toggle').checked = Boolean(next.encrypt_telegram);
+  if (document.getElementById('enc-gdrive-toggle')) document.getElementById('enc-gdrive-toggle').checked = Boolean(next.encrypt_gdrive);
+  if (document.getElementById('enc-onedrive-toggle')) document.getElementById('enc-onedrive-toggle').checked = Boolean(next.encrypt_onedrive);
   updateNightCameraStatus();
 }
 

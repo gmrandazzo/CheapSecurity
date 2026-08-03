@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import pyzipper
-
 from cheapsecurity.cctv import CCTVSystem
 
 

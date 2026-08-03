@@ -57,7 +57,7 @@ Swagger(
         "info": {
             "title": "CheapSecurity API",
             "description": "REST API and MJPEG stream for the CheapSecurity CCTV system.",
-            "version": "0.1.0",
+            "version": "1.0.0",
         },
         "securityDefinitions": {
             "basicAuth": {
