@@ -408,6 +408,48 @@ Example configuration:
 
 If the IR camera fails to open, the system falls back to the day camera and logs a warning.
 
+### Scheduling night mode with cron
+
+You can use `cron` on the Odroid (or any Linux host) to switch between day and IR cameras automatically. The dashboard's REST API accepts `X-Requested-With: XMLHttpRequest` as a CSRF-safe header, so a simple `curl` command is enough.
+
+**Without auth:**
+
+```bash
+# Switch to IR/night camera at 22:00
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": true, "strength": "low"}'
+
+# Switch back to day camera at 06:30
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": false}'
+```
+
+**With Basic Auth:**
+
+```bash
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -u admin:YOUR_PASSWORD \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": true, "strength": "low"}'
+```
+
+Add to your crontab (`crontab -e`):
+
+```cron
+# Night (IR) camera at 22:00
+0 22 * * * curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d '{"enabled": true, "strength": "low"}' > /dev/null 2>&1
+
+# Day camera at 06:30
+30 6 * * * curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d '{"enabled": false}' > /dev/null 2>&1
+```
+
+> **Tip:** If you enabled Basic Auth, put the credentials in an environment variable or a small wrapper script with `0600` permissions instead of pasting them directly into the crontab.
+
 ## Storage and cleanup
 
 - Recordings are saved in `recordings/`.

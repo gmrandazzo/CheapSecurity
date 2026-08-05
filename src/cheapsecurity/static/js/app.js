@@ -63,8 +63,8 @@ function formatDateKey(dateObj) {
 function getRecordingsByDateMap() {
   const map = new Map();
   allRecordings.forEach(r => {
-    const dt = new Date(r.created);
-    const key = formatDateKey(dt);
+    // Use the server-provided UTC date string to avoid timezone drift.
+    const key = r.created_date || formatDateKey(new Date(r.created));
     if (!map.has(key)) {
       map.set(key, []);
     }
@@ -173,7 +173,7 @@ function renderRecordingsList() {
 
   let filtered = allRecordings;
   if (selectedDateStr) {
-    filtered = allRecordings.filter(r => formatDateKey(new Date(r.created)) === selectedDateStr);
+    filtered = allRecordings.filter(r => (r.created_date || formatDateKey(new Date(r.created))) === selectedDateStr);
     const dateFormatted = new Date(selectedDateStr + 'T00:00:00').toLocaleDateString(undefined, {
       year: 'numeric', month: 'short', day: 'numeric'
     });

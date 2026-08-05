@@ -414,12 +414,14 @@ class CCTVSystem:
                 stat = path.stat()
             except FileNotFoundError:
                 continue
+            created_dt = datetime.fromtimestamp(stat.st_mtime)
             videos.append(
                 {
                     "filename": path.name,
                     "size_bytes": stat.st_size,
                     "size_human": self._human_size(stat.st_size),
-                    "created": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "created": created_dt.isoformat(),
+                    "created_date": created_dt.strftime("%Y-%m-%d"),
                 }
             )
         return videos
