@@ -17,7 +17,8 @@
  */
 
 let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, auth_enabled: false };
-const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
+const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+const csrfToken = csrfMeta ? csrfMeta.content : '';
 
 async function loadStatus() {
   try {
