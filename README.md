@@ -137,7 +137,8 @@ Edit `config.json`:
 | `motion` | `threshold` | Pixel difference threshold (0-255) |
 | `motion` | `min_area` | Minimum contour area to trigger motion (full-res pixels) |
 | `motion` | `blur_size` | Gaussian blur kernel size for noise reduction (odd number) |
-| `motion` | `cooldown_seconds` | Keep recording after motion stops |
+| `motion` | `cooldown_seconds` | Seconds to keep the motion flag active after last motion |
+| `motion` | `recording_tail_seconds` | Seconds to keep recording after last motion (joins door-open / person-enter bursts into one clip) |
 | `motion` | `scale` | Downscale factor for motion detection (saves CPU) |
 | `recording` | `dir` | Where videos are saved |
 | `recording` | `max_duration_seconds` | Maximum length of one clip |
@@ -778,6 +779,10 @@ If recordings stop appearing:
    python -m cheapsecurity.diagnose
    ```
 4. Try lowering `motion.min_area` if no motion is detected.
+
+## AI Full Disclosure
+
+This software is developed with strong assistance from Kimi 2.7 and Gemini 3.6 flash and with humans leading the ideas, testing, and debugging. We say this openly because it shaped how the project was built. If you are not happy with AI-developed code, this software is not for you.
 
 ## License
 
