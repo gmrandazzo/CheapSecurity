@@ -16,7 +16,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-let currentSettings = { night_mode: false, night_mode_strength: 'normal', night_device_active: false, night_device_configured: false, notifications_enabled: false, telegram_enabled: false, auth_enabled: false };
 const csrfMeta = document.querySelector('meta[name="csrf-token"]');
 const csrfToken = csrfMeta ? csrfMeta.content : '';
 
