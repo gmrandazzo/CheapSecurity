@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 import cv2
 import pytest
-from cheapsecurity.cctv import CCTVSystem
 from helpers import FakeCapture
+
+from cheapsecurity.cctv import CCTVSystem
 
 
 def _build_config(record_dir: Path) -> dict:

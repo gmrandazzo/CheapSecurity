@@ -6,8 +6,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from cheapsecurity.cctv import CCTVSystem
 from helpers import FakeCapture
+
+from cheapsecurity.cctv import CCTVSystem
 
 
 class TestCCTVSystemInit:
