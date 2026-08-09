@@ -21,6 +21,7 @@
     "min_area": 2000,
     "blur_size": 21,
     "cooldown_seconds": 5,
+    "recording_tail_seconds": 10,
     "scale": 0.25
   },
   "recording": {

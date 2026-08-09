@@ -105,6 +105,7 @@ class CCTVSystem:
         self.min_area = mot["min_area"]
         self.blur_size = max(1, mot["blur_size"] // 2 * 2 + 1)  # must be odd
         self.cooldown_seconds = mot["cooldown_seconds"]
+        self.recording_tail_seconds = mot.get("recording_tail_seconds", self.cooldown_seconds)
         self.motion_scale = max(0.05, min(1.0, mot.get("scale", 1.0)))
 
         web = self.cfg["web"]
@@ -520,7 +521,11 @@ class CCTVSystem:
             else:
                 self.motion_active = False
 
-            should_record = self.motion_active or manual_active
+            # Keep recording for recording_tail_seconds after the last motion
+            # frame. This joins separate motion bursts (e.g. door opening,
+            # then a person walking in) into a single continuous clip.
+            recently_saw_motion = (now - self.last_motion_time) <= self.recording_tail_seconds
+            should_record = recently_saw_motion or manual_active
 
             if should_record and not self.is_recording:
                 self._start_recording(frame)
