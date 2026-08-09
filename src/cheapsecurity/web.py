@@ -25,6 +25,7 @@ and direct playback/download links.
 import base64
 import contextlib
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -45,11 +46,13 @@ from flask import (
     request,
     send_file,
     send_from_directory,
+    session,
 )
 
 from cheapsecurity.cctv import CCTVSystem
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
 Swagger(
     app,
     template={
@@ -57,7 +60,7 @@ Swagger(
         "info": {
             "title": "CheapSecurity API",
             "description": "REST API and MJPEG stream for the CheapSecurity CCTV system.",
-            "version": "0.1.0",
+            "version": "1.0.0",
         },
         "securityDefinitions": {
             "basicAuth": {
@@ -135,17 +138,26 @@ def require_auth() -> Response | None:
 _CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _get_csrf_token() -> str:
+    """Return the current session's CSRF token, creating one if needed."""
+    token = session.get("csrf_token")
+    if token is None:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
 @app.before_request
 def require_csrf() -> Response | None:
     if request.method in _CSRF_SAFE_METHODS:
         return None
+    # Accept a per-session CSRF token (used by the dashboard)...
+    if request.headers.get("X-CSRF-Token") == _get_csrf_token():
+        return None
+    # ...or the standard XMLHttpRequest header (used by API clients/tests).
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return None
-    # Allow requests originating from the Swagger UI page.
-    referrer = request.referrer or ""
-    if "/api/" in referrer:
-        return None
-    resp = make_response(jsonify({"error": "CSRF protection: missing X-Requested-With header"}))
+    resp = make_response(jsonify({"error": "CSRF protection: missing or invalid token"}))
     resp.status_code = 403
     return resp
 
@@ -153,7 +165,27 @@ def require_csrf() -> Response | None:
 @app.route("/")
 def index() -> str:
     cfg = cctv.cfg if cctv else {}
-    return str(render_template("index.html", cfg=cfg))
+    return str(render_template("index.html", cfg=cfg, csrf_token=_get_csrf_token()))
+
+
+@app.route("/api/csrf")
+def api_csrf() -> RouteReturn:
+    """Return the current session CSRF token for API clients.
+    ---
+    tags:
+      - auth
+    security:
+      - basicAuth: []
+    responses:
+      200:
+        description: CSRF token
+        schema:
+          type: object
+          properties:
+            csrf_token:
+              type: string
+    """
+    return jsonify({"csrf_token": _get_csrf_token()})
 
 
 @app.route("/api/status")
@@ -360,7 +392,9 @@ def api_download_recordings() -> RouteReturn:
     if not filenames:
         return jsonify({"error": "No filenames provided"}), 400
 
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(cctv.record_dir)) as temp_zip:
+    with tempfile.NamedTemporaryFile(
+        suffix=".zip", delete=False, dir=str(cctv.record_dir)
+    ) as temp_zip:
         temp_zip_path = temp_zip.name
 
     @after_this_request
@@ -617,6 +651,12 @@ def api_settings() -> RouteReturn:
             "night_device_configured": cctv.night_device is not None,
             "notifications_enabled": cctv.notifications_enabled,
             "telegram_enabled": cctv.telegram_enabled,
+            "gdrive_enabled": cctv.gdrive_enabled,
+            "onedrive_enabled": cctv.onedrive_enabled,
+            "encryption_passphrase": cctv.encryption_passphrase,
+            "encrypt_telegram": cctv.encrypt_telegram,
+            "encrypt_gdrive": cctv.encrypt_gdrive,
+            "encrypt_onedrive": cctv.encrypt_onedrive,
             "auth_enabled": cctv.cfg.get("web", {}).get("auth", {}).get("enabled", False),
         }
     )
@@ -655,6 +695,126 @@ def api_set_telegram() -> RouteReturn:
     enabled = bool(data.get("enabled", cctv.telegram_enabled))
     cctv.set_telegram_enabled(enabled)
     return jsonify({"telegram_enabled": enabled})
+
+
+@app.route("/api/settings/gdrive", methods=["POST"])
+def api_set_gdrive() -> RouteReturn:
+    """Enable or disable Google Drive uploads.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New Google Drive setting
+        examples:
+          application/json:
+            gdrive_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", cctv.gdrive_enabled))
+    cctv.set_gdrive_enabled(enabled)
+    return jsonify({"gdrive_enabled": enabled})
+
+
+@app.route("/api/settings/onedrive", methods=["POST"])
+def api_set_onedrive() -> RouteReturn:
+    """Enable or disable OneDrive uploads.
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            enabled: {type: boolean, example: true}
+    responses:
+      200:
+        description: New OneDrive setting
+        examples:
+          application/json:
+            onedrive_enabled: true
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", cctv.onedrive_enabled))
+    cctv.set_onedrive_enabled(enabled)
+    return jsonify({"onedrive_enabled": enabled})
+
+
+@app.route("/api/settings/encryption", methods=["POST"])
+def api_set_encryption() -> RouteReturn:
+    """Update encryption settings (passphrase and per-channel toggles).
+    ---
+    tags:
+      - settings
+    security:
+      - basicAuth: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            passphrase: {type: string, example: "mysecret123"}
+            telegram: {type: boolean, example: true}
+            google_drive: {type: boolean, example: true}
+            onedrive: {type: boolean, example: true}
+    responses:
+      200:
+        description: New encryption settings
+      403:
+        description: CSRF protection triggered
+      503:
+        description: CCTV engine not initialized
+    """
+    if cctv is None:
+        return jsonify({"error": "CCTV not initialized"}), 503
+    data = request.get_json(silent=True) or {}
+
+    if "passphrase" in data:
+        cctv.set_encryption_passphrase(str(data["passphrase"]))
+    if "telegram" in data:
+        cctv.set_encrypt_telegram(bool(data["telegram"]))
+    if "google_drive" in data:
+        cctv.set_encrypt_gdrive(bool(data["google_drive"]))
+    if "onedrive" in data:
+        cctv.set_encrypt_onedrive(bool(data["onedrive"]))
+
+    return jsonify(
+        {
+            "encryption_passphrase": cctv.encryption_passphrase,
+            "encrypt_telegram": cctv.encrypt_telegram,
+            "encrypt_gdrive": cctv.encrypt_gdrive,
+            "encrypt_onedrive": cctv.encrypt_onedrive,
+        }
+    )
 
 
 @app.route("/api/settings/night_mode", methods=["POST"])

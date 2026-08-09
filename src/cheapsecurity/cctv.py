@@ -26,6 +26,7 @@ for the web interface.
 import contextlib
 import json
 import logging
+import os
 import shutil
 import smtplib
 import ssl
@@ -40,10 +41,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from types import FrameType
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
+import pyzipper
 import requests
 
 from cheapsecurity.rtsp import RTSPPublisher
@@ -71,8 +73,8 @@ class CCTVSystem:
 
         cam = self.cfg["camera"]
         self.device = cam["device"]
-        self.width = cam["width"]
-        self.height = cam["height"]
+        self.width = self._parse_dim(cam.get("width", 2560))
+        self.height = self._parse_dim(cam.get("height", 1440))
         self.fps = cam["fps"]
         self.actual_fps = self.fps
         self.night_mode = cam.get("night_mode", False)
@@ -89,8 +91,8 @@ class CCTVSystem:
 
         # Optional second camera used when night mode is enabled.
         self.night_device: int | str | None = cam.get("night_device")
-        self.night_device_width: int = cam.get("night_device_width", self.width)
-        self.night_device_height: int = cam.get("night_device_height", self.height)
+        self.night_device_width: int = self._parse_dim(cam.get("night_device_width", self.width))
+        self.night_device_height: int = self._parse_dim(cam.get("night_device_height", self.height))
         self.night_device_fps: int = cam.get("night_device_fps", self.fps)
         self.night_software_enhance: bool = cam.get("night_software_enhance", True)
         self._active_device: int | str = self.device
@@ -103,6 +105,7 @@ class CCTVSystem:
         self.min_area = mot["min_area"]
         self.blur_size = max(1, mot["blur_size"] // 2 * 2 + 1)  # must be odd
         self.cooldown_seconds = mot["cooldown_seconds"]
+        self.recording_tail_seconds = mot.get("recording_tail_seconds", self.cooldown_seconds)
         self.motion_scale = max(0.05, min(1.0, mot.get("scale", 1.0)))
 
         web = self.cfg["web"]
@@ -154,6 +157,31 @@ class CCTVSystem:
         self._telegram_offset: int = 0
         self._telegram_poll_thread: threading.Thread | None = None
 
+        # Cloud Storage (Google Drive & OneDrive)
+        cloud_cfg = self.cfg.get("cloud", {})
+        gdrive_cfg = cloud_cfg.get("google_drive", {})
+        self.gdrive_enabled = gdrive_cfg.get("enabled", False)
+        self.gdrive_client_id = gdrive_cfg.get("client_id", "")
+        self.gdrive_client_secret = gdrive_cfg.get("client_secret", "")
+        self.gdrive_refresh_token = gdrive_cfg.get("refresh_token", "")
+        self.gdrive_folder_id = gdrive_cfg.get("folder_id", "")
+
+        onedrive_cfg = cloud_cfg.get("onedrive", {})
+        self.onedrive_enabled = onedrive_cfg.get("enabled", False)
+        self.onedrive_client_id = onedrive_cfg.get("client_id", "")
+        self.onedrive_client_secret = onedrive_cfg.get("client_secret", "")
+        self.onedrive_refresh_token = onedrive_cfg.get("refresh_token", "")
+        self.onedrive_folder_path = onedrive_cfg.get("folder_path", "CheapSecurity")
+
+        # Encryption (AES-256 ZIP)
+        enc_cfg = self.cfg.get("encryption", {})
+        self.encryption_passphrase: str = enc_cfg.get("passphrase", "")
+        self.encrypt_telegram: bool = enc_cfg.get("telegram", False)
+        self.encrypt_gdrive: bool = enc_cfg.get("google_drive", False)
+        self.encrypt_onedrive: bool = enc_cfg.get("onedrive", False)
+
+        self._load_env_secrets()
+
         self.cap: cv2.VideoCapture | None = None
         self.writer: cv2.VideoWriter | None = None
         self.recording_path: Path | None = None
@@ -192,6 +220,55 @@ class CCTVSystem:
         pre_size = int(self.measured_fps * self.pre_buffer_seconds)
         self._pre_buffer: deque = deque(maxlen=max(pre_size, 1))
         self._prev_gray: np.ndarray | None = None
+
+    def _load_env_secrets(self) -> None:
+        """Override sensitive config values with environment variables.
+
+        Environment-supplied secrets take precedence over config.json and are
+        never written back to disk. Leave the config file entries empty or set
+        them to dummy values when using this feature.
+        """
+        self.telegram_token = os.environ.get(
+            "CHEAPSECURITY_TELEGRAM_BOT_TOKEN", self.telegram_token
+        )
+        self.telegram_chat_id = os.environ.get(
+            "CHEAPSECURITY_TELEGRAM_CHAT_ID", self.telegram_chat_id
+        )
+
+        smtp_password = os.environ.get("CHEAPSECURITY_SMTP_PASSWORD")
+        if smtp_password:
+            self.smtp_cfg = dict(self.smtp_cfg)
+            self.smtp_cfg["password"] = smtp_password
+
+        self.gdrive_client_id = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_CLIENT_ID", self.gdrive_client_id
+        )
+        self.gdrive_client_secret = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_CLIENT_SECRET", self.gdrive_client_secret
+        )
+        self.gdrive_refresh_token = os.environ.get(
+            "CHEAPSECURITY_GDRIVE_REFRESH_TOKEN", self.gdrive_refresh_token
+        )
+
+        self.onedrive_client_id = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_CLIENT_ID", self.onedrive_client_id
+        )
+        self.onedrive_client_secret = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_CLIENT_SECRET", self.onedrive_client_secret
+        )
+        self.onedrive_refresh_token = os.environ.get(
+            "CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN", self.onedrive_refresh_token
+        )
+
+        self.encryption_passphrase = os.environ.get(
+            "CHEAPSECURITY_ENCRYPTION_PASSPHRASE", self.encryption_passphrase
+        )
+
+        web_auth_password = os.environ.get("CHEAPSECURITY_WEB_AUTH_PASSWORD")
+        if web_auth_password:
+            self.cfg.setdefault("web", {}).setdefault("auth", {})[
+                "password"
+            ] = web_auth_password
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,6 +338,42 @@ class CCTVSystem:
         self._save_config()
         logger.info(f"Web auth {'enabled' if enabled else 'disabled'}")
 
+    def set_gdrive_enabled(self, enabled: bool) -> None:
+        self.gdrive_enabled = enabled
+        self.cfg.setdefault("cloud", {}).setdefault("google_drive", {})["enabled"] = enabled
+        self._save_config()
+        logger.info(f"Google Drive uploads {'enabled' if enabled else 'disabled'}")
+
+    def set_onedrive_enabled(self, enabled: bool) -> None:
+        self.onedrive_enabled = enabled
+        self.cfg.setdefault("cloud", {}).setdefault("onedrive", {})["enabled"] = enabled
+        self._save_config()
+        logger.info(f"OneDrive uploads {'enabled' if enabled else 'disabled'}")
+
+    def set_encryption_passphrase(self, passphrase: str) -> None:
+        self.encryption_passphrase = passphrase
+        self.cfg.setdefault("encryption", {})["passphrase"] = passphrase
+        self._save_config()
+        logger.info("Encryption passphrase updated.")
+
+    def set_encrypt_telegram(self, enabled: bool) -> None:
+        self.encrypt_telegram = enabled
+        self.cfg.setdefault("encryption", {})["telegram"] = enabled
+        self._save_config()
+        logger.info(f"Telegram encryption {'enabled' if enabled else 'disabled'}")
+
+    def set_encrypt_gdrive(self, enabled: bool) -> None:
+        self.encrypt_gdrive = enabled
+        self.cfg.setdefault("encryption", {})["google_drive"] = enabled
+        self._save_config()
+        logger.info(f"Google Drive encryption {'enabled' if enabled else 'disabled'}")
+
+    def set_encrypt_onedrive(self, enabled: bool) -> None:
+        self.encrypt_onedrive = enabled
+        self.cfg.setdefault("encryption", {})["onedrive"] = enabled
+        self._save_config()
+        logger.info(f"OneDrive encryption {'enabled' if enabled else 'disabled'}")
+
     @property
     def night_device_active(self) -> bool:
         """True when the optional IR/night camera is currently in use."""
@@ -302,12 +415,14 @@ class CCTVSystem:
                 stat = path.stat()
             except FileNotFoundError:
                 continue
+            created_dt = datetime.fromtimestamp(stat.st_mtime)
             videos.append(
                 {
                     "filename": path.name,
                     "size_bytes": stat.st_size,
                     "size_human": self._human_size(stat.st_size),
-                    "created": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "created": created_dt.isoformat(),
+                    "created_date": created_dt.strftime("%Y-%m-%d"),
                 }
             )
         return videos
@@ -332,6 +447,9 @@ class CCTVSystem:
             if self.cap is None:
                 # Give the kernel time to re-enumerate the USB camera before retrying.
                 time.sleep(self._reconnect_backoff)
+                with self._cap_lock:
+                    if self.cap is not None:
+                        continue
                 if self._open_capture():
                     logger.info("Camera reconnected.")
                     self._reconnect_backoff = 1.0
@@ -403,7 +521,11 @@ class CCTVSystem:
             else:
                 self.motion_active = False
 
-            should_record = self.motion_active or manual_active
+            # Keep recording for recording_tail_seconds after the last motion
+            # frame. This joins separate motion bursts (e.g. door opening,
+            # then a person walking in) into a single continuous clip.
+            recently_saw_motion = (now - self.last_motion_time) <= self.recording_tail_seconds
+            should_record = recently_saw_motion or manual_active
 
             if should_record and not self.is_recording:
                 self._start_recording(frame)
@@ -443,6 +565,21 @@ class CCTVSystem:
     # ------------------------------------------------------------------
     # Camera
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_dim(val: int | str | None) -> int:
+        """Parse dimension settings (width/height). Return 0 for auto/max."""
+        if val is None or val == 0:
+            return 0
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("auto", "max", "0", ""):
+                return 0
+            with contextlib.suppress(ValueError):
+                return int(s)
+        if isinstance(val, int):
+            return max(0, val)
+        return 0
+
     def _open_device(
         self,
         device: int | str,
@@ -467,10 +604,15 @@ class CCTVSystem:
             logger.error(f"Failed to open camera device {device}")
             return None
 
-        # Request MJPG pixel format so high resolutions (e.g. 2K) are available
+        # If width or height is <= 0 (auto/max), request oversized dimensions so
+        # V4L2 automatically clamps to the maximum supported hardware resolution.
+        req_w = 10000 if width <= 0 else width
+        req_h = 10000 if height <= 0 else height
+
+        # Request MJPG pixel format so high resolutions (e.g. 2K/4K) are available
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
         cap.set(cv2.CAP_PROP_FPS, fps)
 
         actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -480,9 +622,14 @@ class CCTVSystem:
             self.actual_fps = actual_fps
         else:
             self.actual_fps = fps
-        logger.info(
-            f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
-        )
+        if width <= 0 or height <= 0:
+            logger.info(
+                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+            )
+        else:
+            logger.info(
+                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+            )
 
         if save_defaults:
             # Capture current camera defaults before any night-mode changes
@@ -496,34 +643,61 @@ class CCTVSystem:
         return cap
 
     def _open_capture(self) -> bool:
-        """Open the camera that matches the current night mode."""
+        """Open the camera matching current mode, falling back to alternate if needed."""
         if self.night_mode and self.night_device is not None:
-            device = self.night_device
-            width = self.night_device_width
-            height = self.night_device_height
-            fps = self.night_device_fps
-            save_defaults = False
+            primary_device = self.night_device
+            primary_w, primary_h, primary_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            primary_defaults = False
+            fallback_device: int | str | None = self.device
+            fallback_w, fallback_h, fallback_fps = self.width, self.height, self.fps
+            fallback_defaults = True
         else:
-            device = self.device
-            width = self.width
-            height = self.height
-            fps = self.fps
-            save_defaults = True
+            primary_device = self.device
+            primary_w, primary_h, primary_fps = self.width, self.height, self.fps
+            primary_defaults = True
+            fallback_device = self.night_device
+            fallback_w, fallback_h, fallback_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            fallback_defaults = False
 
-        cap = self._open_device(device, width, height, fps, save_defaults=save_defaults)
+        cap = self._open_device(
+            primary_device, primary_w, primary_h, primary_fps, save_defaults=primary_defaults
+        )
+        active_dev = primary_device
+
+        if cap is None and fallback_device is not None:
+            logger.warning(
+                f"Camera device {primary_device} failed to open; trying fallback device {fallback_device}."
+            )
+            cap = self._open_device(
+                fallback_device,
+                fallback_w,
+                fallback_h,
+                fallback_fps,
+                save_defaults=fallback_defaults,
+            )
+            active_dev = fallback_device
+
         if cap is None:
             return False
 
         with self._cap_lock:
             self.cap = cap
-            self._active_device = device
+            self._active_device = active_dev
         self._apply_camera_night_mode()
         return True
 
     def _switch_camera(self) -> bool:
         """Release the current camera and open the one for the current mode.
 
-        If the requested night camera fails to open, fall back to the day
+        If the requested camera fails to open, fall back to the alternate
         camera so the system keeps running.
         """
         if self.is_recording:
@@ -537,6 +711,10 @@ class CCTVSystem:
             fps = self.night_device_fps
             save_defaults = False
             label = "night"
+            fallback_device: int | str | None = self.device
+            fallback_w, fallback_h, fallback_fps = self.width, self.height, self.fps
+            fallback_defaults = True
+            fallback_label = "day"
         else:
             target_device = self.device
             width = self.width
@@ -544,23 +722,29 @@ class CCTVSystem:
             fps = self.fps
             save_defaults = True
             label = "day"
+            fallback_device = self.night_device
+            fallback_w, fallback_h, fallback_fps = (
+                self.night_device_width,
+                self.night_device_height,
+                self.night_device_fps,
+            )
+            fallback_defaults = False
+            fallback_label = "night"
 
         self._release_capture()
-        cap = self._open_device(
-            target_device, width, height, fps, save_defaults=save_defaults
-        )
+        cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
-        if cap is None and self.night_mode and self.night_device is not None:
-            logger.warning("Night camera failed to open; falling back to day camera.")
-            target_device = self.device
-            width = self.width
-            height = self.height
-            fps = self.fps
-            save_defaults = True
-            label = "day"
-            cap = self._open_device(
-                target_device, width, height, fps, save_defaults=save_defaults
+        if cap is None and fallback_device is not None:
+            logger.warning(
+                f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
             )
+            target_device = fallback_device
+            width = fallback_w
+            height = fallback_h
+            fps = fallback_fps
+            save_defaults = fallback_defaults
+            label = fallback_label
+            cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
         if cap is None:
             logger.error("Camera switch failed; waiting for reconnect loop.")
@@ -578,6 +762,7 @@ class CCTVSystem:
             if self.cap:
                 self.cap.release()
                 self.cap = None
+            self._prev_gray = None
 
     def _apply_camera_night_mode(self) -> None:
         """Try to tune V4L2 camera properties for low light.
@@ -633,7 +818,7 @@ class CCTVSystem:
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (self.blur_size, self.blur_size), 0)
 
-        if self._prev_gray is None:
+        if self._prev_gray is None or self._prev_gray.shape != gray.shape:
             self._prev_gray = gray
             return False
 
@@ -740,6 +925,7 @@ class CCTVSystem:
                     f"Recording saved: {self.recording_path.name} ({self._human_size(size)})"
                 )
                 self._maybe_send_telegram(self.recording_path)
+                self._maybe_upload_cloud(self.recording_path)
 
             self.recording_path = None
         self.is_recording = False
@@ -834,6 +1020,7 @@ class CCTVSystem:
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
             try:
                 self._send_telegram_video(path, chat_id=chat_id)
+                self._maybe_upload_cloud(path)
             except Exception as e:
                 logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
         finally:
@@ -857,9 +1044,7 @@ class CCTVSystem:
         if self._active_device == self.night_device and not self.night_software_enhance:
             return frame
 
-        profile = _NIGHT_MODE_PROFILES.get(
-            self.night_mode_strength, _NIGHT_MODE_PROFILES["normal"]
-        )
+        profile = _NIGHT_MODE_PROFILES.get(self.night_mode_strength, _NIGHT_MODE_PROFILES["normal"])
         gamma = float(profile["gamma"])
 
         lab: np.ndarray = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -990,9 +1175,90 @@ class CCTVSystem:
             return text
         return text.replace(self.telegram_token, "<TOKEN>")
 
+    def _create_aes_zip(self, source_path: Path, archive_name: str | None = None) -> Path:
+        """Compress source_path into an AES-256 encrypted .zip file.
+
+        Returns the path to the newly created .zip archive.
+        """
+        zip_name = (archive_name or source_path.stem) + ".zip"
+        zip_path = source_path.parent / zip_name
+        passphrase = (self.encryption_passphrase or "").encode("utf-8")
+
+        with pyzipper.AESZipFile(
+            zip_path,
+            "w",
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(passphrase)
+            zf.write(source_path, arcname=source_path.name)
+
+        return zip_path
+
+    def _send_telegram_document(self, doc_path: Path, chat_id: str, caption: str = "") -> None:
+        """Send a document (.zip file) to a Telegram chat."""
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendDocument"
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                with open(doc_path, "rb") as f:
+                    files: dict[str, Any] = {"document": (doc_path.name, f, "application/zip")}
+                    data = {"chat_id": chat_id, "caption": caption}
+                    response = requests.post(url, data=data, files=files, timeout=120)
+
+                if response.status_code >= 500:
+                    logger.warning(
+                        f"Telegram API {response.status_code} sending document (attempt {attempt}/{max_retries})"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(backoff)
+                        backoff *= 2
+                    continue
+
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
+                result = response.json().get("result", {})
+                raw_message_id = result.get("message_id")
+                message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
+                if message_id is not None:
+                    self._store_telegram_message(
+                        message_id=message_id,
+                        chat_id=chat_id,
+                        msg_type="document",
+                        caption=doc_path.name,
+                    )
+                logger.info(f"Telegram document sent: {doc_path.name}")
+                return
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Telegram document send failed (attempt {attempt}/{max_retries}): {self._redact_token(str(e))}"
+                )
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+            except Exception as e:
+                logger.error(f"Failed to send Telegram document: {self._redact_token(str(e))}")
+                return
+        logger.error(f"Failed to send Telegram document after {max_retries} attempts")
+
     def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
         target_chat = chat_id or self.telegram_chat_id
         if not target_chat:
+            return
+
+        if self.encrypt_telegram and self.encryption_passphrase:
+            zip_path: Path | None = None
+            try:
+                zip_path = self._create_aes_zip(video_path)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                caption = f"🔒 Encrypted Motion Video ({timestamp})\nFile: {zip_path.name}"
+                self._send_telegram_document(zip_path, target_chat, caption=caption)
+            finally:
+                if zip_path and zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
             return
 
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
@@ -1018,7 +1284,9 @@ class CCTVSystem:
                     continue
 
                 if response.status_code != 200:
-                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
                 result = response.json().get("result", {})
                 raw_message_id = result.get("message_id")
                 message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
@@ -1044,6 +1312,21 @@ class CCTVSystem:
         logger.error(f"Failed to send Telegram video after {max_retries} attempts")
 
     def _send_telegram_photo(self, image_bytes: bytes, chat_id: str, caption: str = "") -> None:
+        if self.encrypt_telegram and self.encryption_passphrase:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_jpg = self.record_dir / f"snapshot_{timestamp}.jpg"
+            zip_path: Path | None = None
+            try:
+                temp_jpg.write_bytes(image_bytes)
+                zip_path = self._create_aes_zip(temp_jpg, archive_name=f"snapshot_{timestamp}")
+                doc_caption = f"🔒 Encrypted Snapshot {caption}".strip()
+                self._send_telegram_document(zip_path, chat_id, caption=doc_caption)
+            finally:
+                temp_jpg.unlink(missing_ok=True)
+                if zip_path and zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
+            return
+
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
         files = {"photo": ("snapshot.jpg", image_bytes, "image/jpeg")}
         data = {"chat_id": chat_id, "caption": caption}
@@ -1062,7 +1345,9 @@ class CCTVSystem:
                         backoff *= 2
                     continue
                 if response.status_code != 200:
-                    raise RuntimeError(f"Telegram API error {response.status_code}: {response.text}")
+                    raise RuntimeError(
+                        f"Telegram API error {response.status_code}: {response.text}"
+                    )
                 result = response.json().get("result", {})
                 raw_message_id = result.get("message_id")
                 message_id: int | None = raw_message_id if isinstance(raw_message_id, int) else None
@@ -1236,7 +1521,9 @@ class CCTVSystem:
                     time.sleep(5)
                     continue
                 if response.status_code != 200:
-                    logger.error(f"Telegram getUpdates error {response.status_code}: {response.text}")
+                    logger.error(
+                        f"Telegram getUpdates error {response.status_code}: {response.text}"
+                    )
                     time.sleep(5)
                     continue
 
@@ -1331,6 +1618,34 @@ class CCTVSystem:
                     "Use /night_mode_off to disable.",
                     chat_id,
                 )
+        elif cmd[0] == "/encrypt_telegram_on":
+            self.set_encrypt_telegram(True)
+            self._send_telegram_message("Telegram upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_telegram_off":
+            self.set_encrypt_telegram(False)
+            self._send_telegram_message("Telegram upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encrypt_gdrive_on":
+            self.set_encrypt_gdrive(True)
+            self._send_telegram_message("Google Drive upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_gdrive_off":
+            self.set_encrypt_gdrive(False)
+            self._send_telegram_message("Google Drive upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encrypt_onedrive_on":
+            self.set_encrypt_onedrive(True)
+            self._send_telegram_message("OneDrive upload encryption enabled (AES-256 ZIP).", chat_id)
+        elif cmd[0] == "/encrypt_onedrive_off":
+            self.set_encrypt_onedrive(False)
+            self._send_telegram_message("OneDrive upload encryption disabled.", chat_id)
+        elif cmd[0] == "/encryption":
+            pass_set = "Set" if bool(self.encryption_passphrase) else "Not set!"
+            status_msg = (
+                f"🔒 Encryption Settings (AES-256 ZIP):\n"
+                f"- Passphrase: {pass_set}\n"
+                f"- Telegram: {'Enabled' if self.encrypt_telegram else 'Disabled'}\n"
+                f"- Google Drive: {'Enabled' if self.encrypt_gdrive else 'Disabled'}\n"
+                f"- OneDrive: {'Enabled' if self.encrypt_onedrive else 'Disabled'}"
+            )
+            self._send_telegram_message(status_msg, chat_id)
         elif cmd[0] == "/help":
             self._send_telegram_message(
                 "Available commands:\n"
@@ -1346,6 +1661,10 @@ class CCTVSystem:
                 "/night_mode_on /night_mode_off - enable or disable night mode\n"
                 "  (switches to the IR camera if one is configured)\n"
                 "/night_mode low|normal|aggressive - set night-mode enhancement strength\n"
+                "/encryption - show cloud & Telegram encryption status\n"
+                "/encrypt_telegram_on /off - toggle Telegram AES-256 encryption\n"
+                "/encrypt_gdrive_on /off - toggle Google Drive AES-256 encryption\n"
+                "/encrypt_onedrive_on /off - toggle OneDrive AES-256 encryption\n"
                 "/help - show this help",
                 chat_id,
             )
@@ -1402,9 +1721,7 @@ class CCTVSystem:
     def _handle_telegram_delete_range(self, cmd: list[str], chat_id: str) -> None:
         try:
             if len(cmd) != 3:
-                self._send_telegram_message(
-                    "Usage: /delete_range <min_id> <max_id>", chat_id
-                )
+                self._send_telegram_message("Usage: /delete_range <min_id> <max_id>", chat_id)
                 return
 
             try:
@@ -1497,6 +1814,161 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"Failed to handle video command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to start recording.", chat_id)
+
+    # ------------------------------------------------------------------
+    # Cloud Storage Uploads (Google Drive & OneDrive)
+    # ------------------------------------------------------------------
+    def _upload_to_gdrive(self, video_path: Path) -> bool:
+        """Upload a video recording to Google Drive via Google Drive REST API v3."""
+        if not self.gdrive_refresh_token or not self.gdrive_client_id:
+            logger.warning("Google Drive credentials not configured; skipping upload.")
+            return False
+
+        target_file = video_path
+        temp_zip: Path | None = None
+        if self.encrypt_gdrive and self.encryption_passphrase:
+            temp_zip = self._create_aes_zip(video_path)
+            target_file = temp_zip
+
+        try:
+            token_url = "https://oauth2.googleapis.com/token"
+            token_data = {
+                "client_id": self.gdrive_client_id,
+                "client_secret": self.gdrive_client_secret,
+                "refresh_token": self.gdrive_refresh_token,
+                "grant_type": "refresh_token",
+            }
+            token_resp = requests.post(token_url, data=token_data, timeout=30)
+            if token_resp.status_code != 200:
+                logger.error(
+                    f"Google Drive token refresh failed: {token_resp.status_code} {token_resp.text}"
+                )
+                return False
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                logger.error("No access_token returned from Google Drive OAuth.")
+                return False
+
+            # Use a resumable upload so the file can be streamed instead of
+            # loading the whole clip into memory on small boards.
+            upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
+            metadata: dict[str, Any] = {"name": target_file.name}
+            if self.gdrive_folder_id:
+                metadata["parents"] = [self.gdrive_folder_id]
+
+            init_headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
+            }
+            init_resp = requests.post(
+                upload_url, headers=init_headers, data=json.dumps(metadata), timeout=30
+            )
+            if init_resp.status_code != 200:
+                logger.error(
+                    f"Google Drive resumable session failed: {init_resp.status_code} {init_resp.text}"
+                )
+                return False
+            location = init_resp.headers.get("Location")
+            if not location:
+                logger.error("Google Drive resumable session returned no Location header.")
+                return False
+
+            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
+            file_size = target_file.stat().st_size
+            upload_headers = {
+                "Content-Length": str(file_size),
+                "Content-Type": mime_type,
+            }
+            with open(target_file, "rb") as f:
+                resp = requests.put(location, headers=upload_headers, data=f, timeout=300)
+
+            if resp.status_code in (200, 201):
+                logger.info(f"Uploaded {target_file.name} to Google Drive.")
+                return True
+            else:
+                logger.error(f"Google Drive upload failed: {resp.status_code} {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Google Drive upload error: {e}")
+            return False
+        finally:
+            if temp_zip and temp_zip.exists():
+                temp_zip.unlink(missing_ok=True)
+
+    def _upload_to_onedrive(self, video_path: Path) -> bool:
+        """Upload a video recording to OneDrive via Microsoft Graph REST API."""
+        if not self.onedrive_refresh_token or not self.onedrive_client_id:
+            logger.warning("OneDrive credentials not configured; skipping upload.")
+            return False
+
+        target_file = video_path
+        temp_zip: Path | None = None
+        if self.encrypt_onedrive and self.encryption_passphrase:
+            temp_zip = self._create_aes_zip(video_path)
+            target_file = temp_zip
+
+        try:
+            token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            token_data = {
+                "client_id": self.onedrive_client_id,
+                "client_secret": self.onedrive_client_secret,
+                "refresh_token": self.onedrive_refresh_token,
+                "grant_type": "refresh_token",
+                "scope": "Files.ReadWrite.All offline_access",
+            }
+            token_resp = requests.post(token_url, data=token_data, timeout=30)
+            if token_resp.status_code != 200:
+                logger.error(
+                    f"OneDrive token refresh failed: {token_resp.status_code} {token_resp.text}"
+                )
+                return False
+            access_token = token_resp.json().get("access_token")
+            if not access_token:
+                logger.error("No access_token returned from OneDrive OAuth.")
+                return False
+
+            folder = self.onedrive_folder_path.strip("/")
+            filename = target_file.name
+            path_url = f"{folder}/{filename}" if folder else filename
+            upload_url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{path_url}:/content"
+
+            mime_type = "application/zip" if target_file.suffix.lower() == ".zip" else "video/avi"
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": mime_type,
+            }
+            with open(target_file, "rb") as f:
+                resp = requests.put(upload_url, headers=headers, data=f, timeout=300)
+
+            if resp.status_code in (200, 201):
+                logger.info(f"Uploaded {target_file.name} to OneDrive.")
+                return True
+            else:
+                logger.error(f"OneDrive upload failed: {resp.status_code} {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"OneDrive upload error: {e}")
+            return False
+        finally:
+            if temp_zip and temp_zip.exists():
+                temp_zip.unlink(missing_ok=True)
+
+    def _maybe_upload_cloud(self, video_path: Path) -> None:
+        """Trigger background cloud uploads if enabled."""
+        if not video_path or not video_path.is_file():
+            return
+        if self.gdrive_enabled:
+            threading.Thread(
+                target=self._upload_to_gdrive,
+                args=(video_path,),
+                daemon=True,
+            ).start()
+        if self.onedrive_enabled:
+            threading.Thread(
+                target=self._upload_to_onedrive,
+                args=(video_path,),
+                daemon=True,
+            ).start()
 
     # ------------------------------------------------------------------
     # Storage cleanup

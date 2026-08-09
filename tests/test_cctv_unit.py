@@ -34,6 +34,32 @@ class TestCCTVSystemInit:
         assert Path(cfg["recording"]["dir"]).exists()
 
 
+class TestEnvSecretOverrides:
+    def test_env_overrides_secrets(self, config_dict, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(config_dict))
+        monkeypatch.setattr(
+            "cv2.VideoCapture", lambda *args, **kwargs: FakeCapture()
+        )
+        monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_BOT_TOKEN", "env_token")
+        monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_CHAT_ID", "env_chat_id")
+        monkeypatch.setenv("CHEAPSECURITY_SMTP_PASSWORD", "env_smtp_pass")
+        monkeypatch.setenv("CHEAPSECURITY_GDRIVE_REFRESH_TOKEN", "env_gdrive_refresh")
+        monkeypatch.setenv("CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN", "env_onedrive_refresh")
+        monkeypatch.setenv("CHEAPSECURITY_ENCRYPTION_PASSPHRASE", "env_passphrase")
+        monkeypatch.setenv("CHEAPSECURITY_WEB_AUTH_PASSWORD", "env_web_pass")
+
+        system = CCTVSystem(str(config_path))
+        assert system.telegram_token == "env_token"
+        assert system.telegram_chat_id == "env_chat_id"
+        assert system.smtp_cfg["password"] == "env_smtp_pass"
+        assert system.gdrive_refresh_token == "env_gdrive_refresh"
+        assert system.onedrive_refresh_token == "env_onedrive_refresh"
+        assert system.encryption_passphrase == "env_passphrase"
+        assert system.cfg["web"]["auth"]["password"] == "env_web_pass"
+        system.stop()
+
+
 class TestNightMode:
     def test_no_op_when_disabled(self, system):
         frame = np.ones((10, 10, 3), dtype=np.uint8) * 128
@@ -319,7 +345,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
         )
         sent = []
@@ -334,7 +361,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append((msg_id, chat_id)) or True,
         )
         system._store_telegram_message(100, "42", "video")
@@ -433,7 +461,8 @@ class TestTelegramMessageStore:
         system.telegram_chat_id = "42"
         deleted = []
         monkeypatch.setattr(
-            system, "_delete_telegram_message",
+            system,
+            "_delete_telegram_message",
             lambda msg_id, chat_id: deleted.append(msg_id) or True,
         )
         sent = []
@@ -458,3 +487,59 @@ class TestTelegramMessageStore:
             {"message": {"text": "/delete_range 200 100", "chat": {"id": 42}}}
         )
         assert any("min_id must be <= max_id" in msg for msg in sent)
+
+    def test_detect_motion_handles_resolution_change(self, system):
+        frame_large = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        frame_small = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        expected_large_shape = (
+            int(1440 * system.motion_scale),
+            int(2560 * system.motion_scale),
+        )
+        expected_small_shape = (
+            int(720 * system.motion_scale),
+            int(1280 * system.motion_scale),
+        )
+
+        # First frame initializes _prev_gray
+        system._detect_motion(frame_large)
+        assert system._prev_gray is not None
+        assert system._prev_gray.shape == expected_large_shape
+
+        # Switching resolution should not crash cv2.absdiff
+        res = system._detect_motion(frame_small)
+        assert res is False
+        assert system._prev_gray.shape == expected_small_shape
+
+    def test_parse_dim(self, system):
+        assert system._parse_dim(0) == 0
+        assert system._parse_dim("0") == 0
+        assert system._parse_dim("auto") == 0
+        assert system._parse_dim("AUTO") == 0
+        assert system._parse_dim("max") == 0
+        assert system._parse_dim(1920) == 1920
+        assert system._parse_dim("1080") == 1080
+        assert system._parse_dim(None) == 0
+
+    def test_cloud_mutators_update_config(self, system):
+        system.set_gdrive_enabled(True)
+        assert system.gdrive_enabled is True
+        assert system.cfg["cloud"]["google_drive"]["enabled"] is True
+
+        system.set_onedrive_enabled(True)
+        assert system.onedrive_enabled is True
+        assert system.cfg["cloud"]["onedrive"]["enabled"] is True
+
+    def test_gdrive_upload_skips_when_credentials_missing(self, system, tmp_path):
+        dummy_file = tmp_path / "test.avi"
+        dummy_file.write_bytes(b"data")
+        system.gdrive_client_id = ""
+        system.gdrive_refresh_token = ""
+        assert system._upload_to_gdrive(dummy_file) is False
+
+    def test_onedrive_upload_skips_when_credentials_missing(self, system, tmp_path):
+        dummy_file = tmp_path / "test.avi"
+        dummy_file.write_bytes(b"data")
+        system.onedrive_client_id = ""
+        system.onedrive_refresh_token = ""
+        assert system._upload_to_onedrive(dummy_file) is False

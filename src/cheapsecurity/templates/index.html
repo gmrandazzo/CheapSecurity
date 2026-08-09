@@ -20,8 +20,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <title>CheapSecurity CCTV</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=1.0.0">
 </head>
 <body>
   <header>
@@ -71,6 +72,14 @@
         <span>Telegram video notifications</span>
       </label>
       <label class="toggle">
+        <input type="checkbox" id="gdrive-toggle" onchange="setGDrive(this.checked)">
+        <span>☁️ Google Drive auto-upload</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="onedrive-toggle" onchange="setOneDrive(this.checked)">
+        <span>☁️ OneDrive auto-upload</span>
+      </label>
+      <label class="toggle">
         <input type="checkbox" id="notif-toggle" onchange="setNotifications(this.checked)">
         <span>Email notifications on motion</span>
       </label>
@@ -78,10 +87,51 @@
         <input type="checkbox" id="auth-toggle" onchange="setAuth(this.checked)">
         <span>Built-in basic auth (disable if using nginx auth)</span>
       </label>
+      <hr style="border:0; border-top: 1px solid var(--border-color, rgba(255,255,255,0.1)); margin: 15px 0;">
+      <h3 style="margin: 0 0 10px 0; font-size: 0.95rem; color: var(--text-muted, #94a3b8);">🔒 Upload Encryption (AES-256 ZIP)</h3>
+      <div style="margin-bottom: 12px;">
+        <label style="display: block; font-size: 0.85rem; margin-bottom: 4px; color: var(--text-muted, #94a3b8);">AES Passphrase:</label>
+        <div style="display: flex; gap: 8px;">
+          <input type="password" id="enc-passphrase" placeholder="Enter secret passphrase" style="flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); color: #fff;">
+          <button class="btn btn-secondary" onclick="saveEncryptionPassphrase()">Save</button>
+        </div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="enc-telegram-toggle" onchange="setEncryptionToggle('telegram', this.checked)">
+        <span>🔒 Encrypt Telegram uploads & snapshots</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="enc-gdrive-toggle" onchange="setEncryptionToggle('google_drive', this.checked)">
+        <span>🔒 Encrypt Google Drive uploads</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="enc-onedrive-toggle" onchange="setEncryptionToggle('onedrive', this.checked)">
+        <span>🔒 Encrypt OneDrive uploads</span>
+      </label>
     </section>
 
     <section class="card">
-      <h2>Recordings</h2>
+      <div class="card-header">
+        <h2>📅 Recordings Calendar</h2>
+        <div class="calendar-controls">
+          <button class="secondary-btn icon-btn" onclick="changeMonth(-1)">&lsaquo;</button>
+          <span id="calendar-month-year"></span>
+          <button class="secondary-btn icon-btn" onclick="changeMonth(1)">&rsaquo;</button>
+          <button id="clear-filter-btn" class="secondary-btn" onclick="clearDateFilter()" style="display:none;">Show All</button>
+        </div>
+      </div>
+      <div id="calendar-container">
+        <div class="calendar-weekdays">
+          <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+        </div>
+        <div id="calendar-days" class="calendar-days"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2 id="recordings-title">Recordings</h2>
+      </div>
       <div class="toolbar">
         <button id="refresh-btn" onclick="loadRecordings()">Refresh</button>
         <label class="toggle inline">
@@ -96,6 +146,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=1.0.0"></script>
 </body>
 </html>

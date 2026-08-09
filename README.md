@@ -21,10 +21,18 @@ Key Features
 - **Live MJPEG stream** with a web dashboard
 - **Motion detection** with frame differencing
 - **Automatic recording** with a pre-motion buffer
+- **Interactive Recordings Calendar**: filter video recordings by date with pulsing red day badges
+- **Cloud Storage Integration**:
+  - Direct auto-upload of motion recordings to **Google Drive** (via Google Drive API v3)
+  - Direct auto-upload of motion recordings to **OneDrive** (via Microsoft Graph API)
+- **AES-256 ZIP Upload Encryption**:
+  - Independently encrypt video clips and snapshots before uploading to Telegram, Google Drive, or OneDrive
+  - Password-protected `.zip` format opens natively on iOS (Files app), Android, macOS, and Windows
+  - Manage encryption passphrase and per-channel toggles from dashboard or Telegram bot
 - **Email alerts** with a snapshot picture when motion starts
 - **Telegram integration**:
-  - Automatic video upload after motion is recorded
-  - Bot commands: `/snapshot`, `/video <seconds>`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
+  - Automatic video upload after motion is recorded (supports AES-256 encrypted `.zip` delivery)
+  - Bot commands: `/snapshot`, `/video <seconds>`, `/encryption`, `/encrypt_telegram_on/off`, `/encrypt_gdrive_on/off`, `/encrypt_onedrive_on/off`, `/sent`, `/delete`, `/delete_range`, `/id`, `/telegram_on/off`, `/email_on/off`, `/help`
 - **Night mode** low-light enhancement (software CLAHE + brightness/contrast boost, with optional second IR/night camera)
 - **Recordings bulk actions**: select all, send to Telegram, download ZIP, delete
 - **Interactive Swagger UI** at `/api/` for the REST API
@@ -116,11 +124,11 @@ Edit `config.json`:
 | Section | Key | Description |
 |---------|-----|-------------|
 | `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) |
-| `camera` | `width`, `height`, `fps` | Capture resolution and frame rate |
+| `camera` | `width`, `height`, `fps` | Capture resolution and frame rate. Set `width` and `height` to `0` or `"auto"` to automatically detect and use the camera's maximum supported hardware resolution. |
 | `camera` | `night_mode` | Enable low-light enhancement / IR camera switching |
 | `camera` | `night_mode_strength` | Software enhancement strength: `low`, `normal`, or `aggressive` |
 | `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`). Set to `null` to use a single camera. |
-| `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera |
+| `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera (set `width`/`height` to `0` or `"auto"` for max resolution) |
 | `camera` | `night_software_enhance` | Apply CLAHE/gamma to the IR camera feed (`true`/`false`) |
 | `camera` | `night_mode_fps` | Target FPS in night mode (camera may ignore this) |
 | `camera` | `night_mode_gain` | Target analog gain in night mode (camera may ignore this) |
@@ -128,7 +136,9 @@ Edit `config.json`:
 | `camera` | `night_mode_contrast` | Contrast boost in night mode |
 | `motion` | `threshold` | Pixel difference threshold (0-255) |
 | `motion` | `min_area` | Minimum contour area to trigger motion (full-res pixels) |
-| `motion` | `cooldown_seconds` | Keep recording after motion stops |
+| `motion` | `blur_size` | Gaussian blur kernel size for noise reduction (odd number) |
+| `motion` | `cooldown_seconds` | Seconds to keep the motion flag active after last motion |
+| `motion` | `recording_tail_seconds` | Seconds to keep recording after last motion (joins door-open / person-enter bursts into one clip) |
 | `motion` | `scale` | Downscale factor for motion detection (saves CPU) |
 | `recording` | `dir` | Where videos are saved |
 | `recording` | `max_duration_seconds` | Maximum length of one clip |
@@ -143,6 +153,12 @@ Edit `config.json`:
 | `telegram` | `send_video` | Whether to upload the video file automatically |
 | `telegram` | `min_interval_minutes` | Minimum time between Telegram uploads |
 | `telegram` | `poll_commands` | Enable `/snapshot`, `/video`, and `/help` bot commands |
+| `cloud` | `google_drive` | Google Drive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, optional `folder_id`) |
+| `cloud` | `onedrive` | Microsoft OneDrive auto-upload configuration (`enabled`, `client_id`, `client_secret`, `refresh_token`, `folder_path`) |
+| `encryption` | `passphrase` | Secret passphrase used to encrypt ZIP archives (AES-256) |
+| `encryption` | `telegram` | Enable AES-256 ZIP encryption for Telegram uploads & snapshots (`true`/`false`) |
+| `encryption` | `google_drive` | Enable AES-256 ZIP encryption for Google Drive uploads (`true`/`false`) |
+| `encryption` | `onedrive` | Enable AES-256 ZIP encryption for OneDrive uploads (`true`/`false`) |
 | `storage` | `max_age_days` | Delete recordings older than this (default 3 days = 72h) |
 | `storage` | `max_size_gb` | Delete oldest files if total exceeds this |
 | `storage` | `cleanup_interval_minutes` | How often storage cleanup runs |
@@ -158,6 +174,51 @@ Edit `config.json`:
 | `web` | `host`, `port` | Dashboard bind address and port |
 | `web` | `stream_scale` | Downscale factor for live stream (saves bandwidth/CPU) |
 | `web.auth` | `enabled`, `username`, `password` | Optional HTTP Basic Auth |
+
+## Keeping secrets out of `config.json`
+
+By default all credentials live in `config.json`. The file is created with restrictive (`0o600`) permissions, but you can keep the actual secrets off disk by supplying them through environment variables. Environment values take precedence over the config file and are **never written back to disk**.
+
+| Secret | Environment variable |
+|--------|----------------------|
+| Telegram bot token | `CHEAPSECURITY_TELEGRAM_BOT_TOKEN` |
+| Telegram chat ID | `CHEAPSECURITY_TELEGRAM_CHAT_ID` |
+| SMTP password | `CHEAPSECURITY_SMTP_PASSWORD` |
+| Google Drive client ID | `CHEAPSECURITY_GDRIVE_CLIENT_ID` |
+| Google Drive client secret | `CHEAPSECURITY_GDRIVE_CLIENT_SECRET` |
+| Google Drive refresh token | `CHEAPSECURITY_GDRIVE_REFRESH_TOKEN` |
+| OneDrive client ID | `CHEAPSECURITY_ONEDRIVE_CLIENT_ID` |
+| OneDrive client secret | `CHEAPSECURITY_ONEDRIVE_CLIENT_SECRET` |
+| OneDrive refresh token | `CHEAPSECURITY_ONEDRIVE_REFRESH_TOKEN` |
+| ZIP encryption passphrase | `CHEAPSECURITY_ENCRYPTION_PASSPHRASE` |
+| Web dashboard password | `CHEAPSECURITY_WEB_AUTH_PASSWORD` |
+
+Example with a systemd unit:
+
+```ini
+[Service]
+Environment="CHEAPSECURITY_TELEGRAM_BOT_TOKEN=123456:ABC..."
+Environment="CHEAPSECURITY_ENCRYPTION_PASSPHRASE=your-strong-passphrase"
+EnvironmentFile=-/etc/cheapsecurity.env
+```
+
+### Hardening the systemd service
+
+Even with secrets in the environment, the backend still runs as a normal user. You can sandbox it so a compromised process has very limited filesystem access:
+
+```ini
+[Service]
+User=cheapsecurity
+Group=cheapsecurity
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/home/cheapsecurity/CheapSecurity/recordings
+BindReadOnlyPaths=/home/cheapsecurity/CheapSecurity/config.json
+```
+
+This confines the app to its recordings directory and read-only access to `config.json`. **Note:** if the attacker gains root or the service-user account, they can still read anything that user can read, including environment variables and credential files. For strongest protection, run behind an HTTPS reverse proxy on a trusted LAN and keep the OS up to date.
 
 ## Telegram setup
 
@@ -225,7 +286,39 @@ The bot only responds to your configured `chat_id`.
 
 **Motion has priority:** if the system is already recording because motion was detected, a `/video` request will not interrupt it. The bot will reply that a motion video is in progress and will be uploaded automatically.
 
-**Deleting messages and cloud cache:** Telegram bots cannot purge Telegram’s master cloud storage directly. When you delete a message, the media file becomes orphaned and is eventually garbage-collected by Telegram. Only messages sent by this bot after this feature is enabled are tracked; older messages do not have stored IDs and cannot be deleted this way.
+## AES-256 Upload Encryption
+
+CheapSecurity allows you to encrypt video clips and snapshots before uploading them to public channels (**Telegram**, **Google Drive**, or **OneDrive**).
+
+Files are packaged into standard password-protected `.zip` archives using **AES-256 encryption**.
+
+### Behavior Summary
+
+| Channel | Encryption ON (Passphrase set) | Encryption OFF |
+| :--- | :--- | :--- |
+| **Telegram Snapshots (`/snapshot`)** | Sent as AES-256 `.zip` file (`snapshot_TIMESTAMP.zip`) | Sent as normal `.jpg` photo |
+| **Telegram Videos (`/video` & motion)** | Sent as AES-256 `.zip` file (`motion_TIMESTAMP.zip`) | Sent as normal `.mp4`/`.avi` video |
+| **Google Drive Uploads** | Uploaded as AES-256 `.zip` file | Uploaded as normal `.avi` video |
+| **OneDrive Uploads** | Uploaded as AES-256 `.zip` file | Uploaded as normal `.avi` video |
+| **Local Odroid Footage** | Saved unencrypted on Odroid for fast dashboard playback | Saved unencrypted on Odroid for fast dashboard playback |
+
+### Unencrypting & Playing Media on Your Devices
+
+When encryption is enabled, downloaded files are standard password-protected `.zip` archives. **No extra software or web apps are required!**
+
+- **iPhone (iOS)**: Tap the `.zip` file in Telegram or the iOS Files app, enter your passphrase when prompted, and tap the unzipped `.mp4` or `.jpg` to view natively.
+- **Android**: Tap the `.zip` file in Files by Google or your file manager, enter your passphrase, and extract to view.
+- **Mac / Windows / Linux**: Double-click the `.zip` file (or use 7-Zip, WinRAR, Keka, or macOS Archive Utility), enter your passphrase, and play the unencrypted video.
+
+### Managing Encryption via Telegram Bot
+
+You can check and toggle upload encryption on the fly using Telegram bot commands:
+- `/encryption` — Show current passphrase status and channel encryption state.
+- `/encrypt_telegram_on` / `/encrypt_telegram_off` — Toggle Telegram AES-256 encryption.
+- `/encrypt_gdrive_on` / `/encrypt_gdrive_off` — Toggle Google Drive AES-256 encryption.
+- `/encrypt_onedrive_on` / `/encrypt_onedrive_off` — Toggle OneDrive AES-256 encryption.
+
+---
 
 ## Email alerts
 
@@ -315,6 +408,48 @@ Example configuration:
 - `night_software_enhance` — set to `false` if the IR image is already usable; set to `true` if you want the CLAHE/gamma enhancement applied to the IR feed as well.
 
 If the IR camera fails to open, the system falls back to the day camera and logs a warning.
+
+### Scheduling night mode with cron
+
+You can use `cron` on the Odroid (or any Linux host) to switch between day and IR cameras automatically. The dashboard's REST API accepts `X-Requested-With: XMLHttpRequest` as a CSRF-safe header, so a simple `curl` command is enough.
+
+**Without auth:**
+
+```bash
+# Switch to IR/night camera at 22:00
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": true, "strength": "low"}'
+
+# Switch back to day camera at 06:30
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": false}'
+```
+
+**With Basic Auth:**
+
+```bash
+curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode \
+  -u admin:YOUR_PASSWORD \
+  -H "Content-Type: application/json" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -d '{"enabled": true, "strength": "low"}'
+```
+
+Add to your crontab (`crontab -e`):
+
+```cron
+# Night (IR) camera at 22:00
+0 22 * * * curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d '{"enabled": true, "strength": "low"}' > /dev/null 2>&1
+
+# Day camera at 06:30
+30 6 * * * curl -s -X POST http://192.168.178.41:5000/api/settings/night_mode -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d '{"enabled": false}' > /dev/null 2>&1
+```
+
+> **Tip:** If you enabled Basic Auth, put the credentials in an environment variable or a small wrapper script with `0600` permissions instead of pasting them directly into the crontab.
 
 ## Storage and cleanup
 
@@ -644,6 +779,10 @@ If recordings stop appearing:
    python -m cheapsecurity.diagnose
    ```
 4. Try lowering `motion.min_area` if no motion is detected.
+
+## AI Full Disclosure
+
+This software is developed with strong assistance from Kimi 2.7 and Gemini 3.6 flash and with humans leading the ideas, testing, and debugging. We say this openly because it shaped how the project was built. If you are not happy with AI-developed code, this software is not for you.
 
 ## License
 
