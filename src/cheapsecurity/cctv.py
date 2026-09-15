@@ -64,13 +64,18 @@ _NIGHT_MODE_PROFILES: dict[str, dict[str, float | int]] = {
     "aggressive": {"gamma": 0.35, "clip_limit": 3.0, "tile_grid": 8},
 }
 
-# AUTO camera detection. A true monochrome/IR sensor delivers grayscale frames
-# (zero chroma), while a color camera shows saturation even in poor light.
-# Scores at or below this threshold mark the night/IR camera.
-_AUTO_MONO_SCORE = 8.0
+# AUTO camera detection tuning. A true monochrome/IR sensor delivers frames
+# with exactly zero chroma, while a color sensor with the IR-cut filter removed
+# shows vivid pixels clustered in one or two hue bins (a uniform tint).
 _AUTO_PROBE_WIDTH = 320
 _AUTO_PROBE_HEIGHT = 240
-_AUTO_PROBE_FRAMES = 10
+_AUTO_PROBE_FRAMES = 15
+_AUTO_PROBE_SETTLE_S = 0.3
+_AUTO_PROBE_MAX_FAILURES = 8
+_AUTO_VIVID_SATURATION = 60  # S channel value counted as "vivid"
+_AUTO_TINT_MIN_VIVID_FRACTION = 0.02  # need >= 2% vivid pixels for tint analysis
+_AUTO_TINT_MAX_HUE_BINS = 2  # vivid hues in <= 2 bins -> IR-tinted sensor
+_AUTO_HUE_BIN_WIDTH = 10  # OpenCV hue is 0-179 -> 18 bins
 
 
 class CCTVSystem:
@@ -636,20 +641,40 @@ class CCTVSystem:
         return card, bool(device_caps & 0x00000001)  # V4L2_CAP_VIDEO_CAPTURE
 
     @staticmethod
-    def _frame_color_score(frame: np.ndarray) -> float:
-        """Score how colorful a frame is: 0 for monochrome, higher for color."""
-        if frame.ndim == 2:
-            return 0.0
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        return float(np.percentile(hsv[..., 1], 95))
+    def _analyze_frame(frame: np.ndarray) -> tuple[float, str]:
+        """Classify a probe frame.
 
-    def _probe_device_score(self, device: int) -> float | None:
-        """Open a device briefly and score its color-ness.
+        Returns (color_score, kind) where kind is:
+        - "mono": grayscale frame or exactly zero chroma — a true IR/mono
+          sensor (works regardless of scene brightness).
+        - "tinted": >= 2% vivid pixels but their hues clustered in 1-2 bins —
+          typical for a color sensor with the IR-cut filter removed.
+        - "color": a normal color camera.
+        """
+        if frame.ndim == 2:
+            return 0.0, "mono"
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        saturation = hsv[..., 1]
+        if int(saturation.max()) == 0:
+            # YUYV from a monochrome sensor decodes to exactly zero chroma.
+            return 0.0, "mono"
+        score = float(np.percentile(saturation, 95))
+        vivid = saturation >= _AUTO_VIVID_SATURATION
+        if float(vivid.mean()) >= _AUTO_TINT_MIN_VIVID_FRACTION:
+            bins = int(180 // _AUTO_HUE_BIN_WIDTH)
+            hues = hsv[..., 0][vivid] // _AUTO_HUE_BIN_WIDTH
+            hist = np.bincount(hues, minlength=bins)
+            spread = int((hist >= _AUTO_TINT_MIN_VIVID_FRACTION * hues.size).sum())
+            if spread <= _AUTO_TINT_MAX_HUE_BINS:
+                return score, "tinted"
+        return score, "color"
+
+    def _probe_device(self, device: int) -> tuple[float, str] | None:
+        """Open a device briefly and classify it from real frames.
 
         Returns None when the node cannot deliver frames (metadata node,
-        busy device, codec node). The 95th percentile of the HSV saturation
-        channel is used so a dark scene on a color camera is not mistaken
-        for a monochrome sensor.
+        busy device, codec node). A short settle time and tolerance for
+        transient read failures make probing reliable on shared USB buses.
         """
         cap: cv2.VideoCapture | None = None
         try:
@@ -659,67 +684,98 @@ class CCTVSystem:
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, _AUTO_PROBE_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _AUTO_PROBE_HEIGHT)
+            # Give the sensor a moment to start streaming and auto-expose.
+            time.sleep(_AUTO_PROBE_SETTLE_S)
             frame: np.ndarray | None = None
+            failures = 0
             for _ in range(_AUTO_PROBE_FRAMES):
                 ok, candidate = cap.read()
                 if not ok or candidate is None:
-                    break
+                    failures += 1
+                    if failures >= _AUTO_PROBE_MAX_FAILURES:
+                        return None
+                    time.sleep(0.05)
+                    continue
+                failures = 0
                 frame = candidate
             if frame is None:
                 return None
-            return self._frame_color_score(frame)
+            return self._analyze_frame(frame)
         except Exception:
             return None
         finally:
             if cap is not None:
                 cap.release()
+            # Let the shared USB bus settle before the next device.
+            time.sleep(0.1)
 
     def _resolve_auto_devices(self) -> bool:
         """Probe all V4L2 capture devices and assign day/night cameras.
 
-        The day camera is the most colorful one; the night camera is a
-        clearly monochrome one (true IR/mono sensor), if present. Detection
-        is content-based, so it survives USB enumeration order changes
-        across reboots. Returns False when no working camera is found.
+        Frame content decides: plain color cameras are preferred for day, a
+        monochrome (true IR/mono sensor) or IR-tinted one becomes the night
+        camera. Detection re-runs on every reconnect, so it survives USB
+        enumeration reordering across reboots and replugs. Returns False when
+        no working camera is found.
         """
         scores: dict[int, float] = {}
+        kinds: dict[int, str] = {}
         seen_names: set[str] = set()
+
         for index in self._enumerate_video_devices():
             caps = self._v4l2_device_caps(index)
+            name = "unknown"
             if caps is not None:
                 name, is_capture = caps
                 if not is_capture:
+                    logger.info(
+                        f"AUTO camera: skipping /dev/video{index} ({name}): not a capture device"
+                    )
                     continue
                 if name in seen_names:
                     continue  # second node of the same physical camera
                 seen_names.add(name)
-            score = self._probe_device_score(index)
-            if score is None:
+
+            probe = self._probe_device(index)
+            if probe is None:
+                logger.warning(
+                    f"AUTO camera: /dev/video{index} ({name}) did not deliver frames; skipping"
+                )
                 continue
+            score, kind = probe
             scores[index] = score
-            label = caps[0] if caps else "unknown"
-            logger.info(f"AUTO camera: /dev/video{index} ({label}) color score {score:.1f}")
+            kinds[index] = kind
+            logger.info(f"AUTO camera: /dev/video{index} ({name}) score {score:.1f} [{kind}]")
 
         if not scores:
             logger.warning("AUTO camera: no working camera found.")
             return False
 
         if self._auto_device:
-            day = max(scores, key=lambda d: scores[d])
-            self.device = day
-            logger.info(f"AUTO camera: day camera → /dev/video{day} (score {scores[day]:.1f})")
+            # Plain color cameras are always preferred for day, even when a
+            # tinted (IR-modified) camera scores higher; tinted and mono only
+            # as a last resort when no plain color camera exists.
+            preference = {"color": 2, "tinted": 1, "mono": 0}
+            self.device = max(scores, key=lambda d: (preference[kinds[d]], scores[d]))
+            logger.info(f"AUTO camera: day camera → /dev/video{self.device}")
 
         if self._auto_night_device:
             day_index = self.device if isinstance(self.device, int) else None
-            others = {d: s for d, s in scores.items() if d != day_index}
-            night = min(others, key=lambda d: others[d]) if others else None
-            if night is not None and others[night] <= _AUTO_MONO_SCORE:
+            mono = [d for d, k in kinds.items() if k == "mono" and d != day_index]
+            tinted = [d for d, k in kinds.items() if k == "tinted" and d != day_index]
+            if mono:
+                night: int | None = min(mono, key=lambda d: scores[d])
+            elif tinted:
+                night = tinted[0]
+            else:
+                night = None
+            if night is not None:
                 self.night_device = night
-                logger.info(f"AUTO camera: night camera → /dev/video{night} (monochrome)")
+                logger.info(f"AUTO camera: night camera → /dev/video{night} [{kinds[night]}]")
             else:
                 self.night_device = None
                 logger.info(
-                    "AUTO camera: no monochrome camera found; "
+                    "AUTO camera: no night/IR camera found; "
                     "night mode will use software enhancement"
                 )
 

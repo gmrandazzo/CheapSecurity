@@ -420,21 +420,25 @@ USB camera device numbers (`/dev/videoN`) depend on USB enumeration order and ca
 }
 ```
 
-On startup (and whenever the camera reconnects) the system probes every V4L2 capture device, scores each one by color saturation from real frames, and assigns:
+On startup (and whenever the camera reconnects) the system opens every V4L2 capture device for a moment, captures real frames, and classifies each camera:
 
-- **day camera** — the most colorful one (a normal color webcam)
-- **night/IR camera** — a clearly monochrome one (a true IR/mono sensor outputs grayscale frames)
+- **`mono`** — grayscale frames or exactly zero chroma: a true IR/mono sensor. This works at any brightness, because a mono sensor never produces color information.
+- **`tinted`** — vivid pixels, but all clustered in one or two hue bins: a color sensor with the IR-cut filter removed (the typical cheap "night vision" camera), which shows a uniform reddish/bluish cast.
+- **`color`** — vivid pixels spread across hues: a normal color webcam.
 
-Detection is content-based, so it picks the right physical cameras no matter which `/dev/videoN` numbers the kernel assigns. Non-camera nodes (e.g. the `bcm2835-codec`/`bcm2835-isp` devices on a Raspberry Pi, or UVC metadata nodes) are skipped automatically. If no monochrome camera is found, night mode falls back to software enhancement on the day camera. Watch the service log to see which camera was picked:
+Assignment: the **day camera** is a plain `color` camera (preferred by class, then by score — a tinted IR camera can out-score a color one but never takes the day slot). The **night/IR camera** is a `mono` one if present, otherwise a `tinted` one. If neither exists, night mode falls back to software enhancement on the day camera.
+
+Detection is content-based, so it picks the right physical cameras no matter which `/dev/videoN` numbers the kernel assigns. Non-camera nodes (e.g. the `bcm2835-codec`/`bcm2835-isp` devices on a Raspberry Pi, or UVC metadata nodes) are skipped automatically. Watch the service log to see what was detected and picked:
 
 ```text
-AUTO camera: /dev/video0 (FHD Camera) color score 52.4
-AUTO camera: /dev/video2 (2K HD Camera) color score 0.0
-AUTO camera: day camera → /dev/video0 (score 52.4)
-AUTO camera: night camera → /dev/video2 (monochrome)
+AUTO camera: skipping /dev/video1 (FHD Camera): not a capture device
+AUTO camera: /dev/video0 (FHD Camera) score 52.4 [color]
+AUTO camera: /dev/video2 (2K HD Camera) score 61.7 [tinted]
+AUTO camera: day camera → /dev/video0
+AUTO camera: night camera → /dev/video2 [tinted]
 ```
 
-The setting also accepts explicit device paths (e.g. `"/dev/v4l/by-id/..."`) for a stable identifier when you prefer fixed assignments.
+The settings also accept explicit device paths (e.g. `"/dev/v4l/by-id/..."`) for a stable identifier when you prefer fixed assignments.
 
 ### Scheduling night mode with cron
 
