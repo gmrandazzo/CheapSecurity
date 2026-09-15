@@ -123,11 +123,11 @@ Edit `config.json`:
 
 | Section | Key | Description |
 |---------|-----|-------------|
-| `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) |
+| `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) or device path, or `"auto"` to auto-detect (see below) |
 | `camera` | `width`, `height`, `fps` | Capture resolution and frame rate. Set `width` and `height` to `0` or `"auto"` to automatically detect and use the camera's maximum supported hardware resolution. |
 | `camera` | `night_mode` | Enable low-light enhancement / IR camera switching |
 | `camera` | `night_mode_strength` | Software enhancement strength: `low`, `normal`, or `aggressive` |
-| `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`). Set to `null` to use a single camera. |
+| `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`), or `"auto"` to auto-detect. Set to `null` to use a single camera. |
 | `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera (set `width`/`height` to `0` or `"auto"` for max resolution) |
 | `camera` | `night_software_enhance` | Apply CLAHE/gamma to the IR camera feed (`true`/`false`) |
 | `camera` | `night_mode_fps` | Target FPS in night mode (camera may ignore this) |
@@ -408,6 +408,33 @@ Example configuration:
 - `night_software_enhance` — set to `false` if the IR image is already usable; set to `true` if you want the CLAHE/gamma enhancement applied to the IR feed as well.
 
 If the IR camera fails to open, the system falls back to the day camera and logs a warning.
+
+### Automatic camera detection (`"auto"`)
+
+USB camera device numbers (`/dev/videoN`) depend on USB enumeration order and can change between reboots or when cameras are re-plugged. Instead of hardcoding indices you can let CheapSecurity detect the cameras from their actual video content:
+
+```json
+"camera": {
+  "device": "auto",
+  "night_device": "auto"
+}
+```
+
+On startup (and whenever the camera reconnects) the system probes every V4L2 capture device, scores each one by color saturation from real frames, and assigns:
+
+- **day camera** — the most colorful one (a normal color webcam)
+- **night/IR camera** — a clearly monochrome one (a true IR/mono sensor outputs grayscale frames)
+
+Detection is content-based, so it picks the right physical cameras no matter which `/dev/videoN` numbers the kernel assigns. Non-camera nodes (e.g. the `bcm2835-codec`/`bcm2835-isp` devices on a Raspberry Pi, or UVC metadata nodes) are skipped automatically. If no monochrome camera is found, night mode falls back to software enhancement on the day camera. Watch the service log to see which camera was picked:
+
+```text
+AUTO camera: /dev/video0 (FHD Camera) color score 52.4
+AUTO camera: /dev/video2 (2K HD Camera) color score 0.0
+AUTO camera: day camera → /dev/video0 (score 52.4)
+AUTO camera: night camera → /dev/video2 (monochrome)
+```
+
+The setting also accepts explicit device paths (e.g. `"/dev/v4l/by-id/..."`) for a stable identifier when you prefer fixed assignments.
 
 ### Scheduling night mode with cron
 

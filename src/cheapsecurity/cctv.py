@@ -64,6 +64,14 @@ _NIGHT_MODE_PROFILES: dict[str, dict[str, float | int]] = {
     "aggressive": {"gamma": 0.35, "clip_limit": 3.0, "tile_grid": 8},
 }
 
+# AUTO camera detection. A true monochrome/IR sensor delivers grayscale frames
+# (zero chroma), while a color camera shows saturation even in poor light.
+# Scores at or below this threshold mark the night/IR camera.
+_AUTO_MONO_SCORE = 8.0
+_AUTO_PROBE_WIDTH = 320
+_AUTO_PROBE_HEIGHT = 240
+_AUTO_PROBE_FRAMES = 10
+
 
 class CCTVSystem:
     def __init__(self, config_path: str = "config.json"):
@@ -72,7 +80,9 @@ class CCTVSystem:
             self.cfg = json.load(f)
 
         cam = self.cfg["camera"]
-        self.device = cam["device"]
+        raw_device = cam["device"]
+        self._auto_device = isinstance(raw_device, str) and raw_device.strip().lower() == "auto"
+        self.device: int | str = 0 if self._auto_device else raw_device
         self.width = self._parse_dim(cam.get("width", 2560))
         self.height = self._parse_dim(cam.get("height", 1440))
         self.fps = cam["fps"]
@@ -89,8 +99,16 @@ class CCTVSystem:
         if self.night_mode_strength not in _NIGHT_MODE_PROFILES:
             self.night_mode_strength = "normal"
 
-        # Optional second camera used when night mode is enabled.
-        self.night_device: int | str | None = cam.get("night_device")
+        # Optional second camera used when night mode is enabled. The string
+        # "auto" enables content-based detection (see _resolve_auto_devices).
+        raw_night_device = cam.get("night_device")
+        self._auto_night_device = (
+            isinstance(raw_night_device, str) and raw_night_device.strip().lower() == "auto"
+        )
+        self.night_device: int | str | None = (
+            None if raw_night_device is None or self._auto_night_device else raw_night_device
+        )
+        self._auto_resolved = not (self._auto_device or self._auto_night_device)
         self.night_device_width: int = self._parse_dim(cam.get("night_device_width", self.width))
         self.night_device_height: int = self._parse_dim(cam.get("night_device_height", self.height))
         self.night_device_fps: int = cam.get("night_device_fps", self.fps)
@@ -200,6 +218,7 @@ class CCTVSystem:
         self._manual_record_chat_id: str | None = None
         self._manual_recording_active: bool = False
         self._manual_finalize_done = threading.Event()
+        self._prebuffer_span = 0.0
 
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -432,8 +451,7 @@ class CCTVSystem:
     # ------------------------------------------------------------------
     def _run(self) -> None:
         if not self._open_capture():
-            logger.error("Could not open camera. Engine halted.")
-            return
+            logger.error("Could not open camera at startup; will keep retrying in the background.")
 
         last_cleanup = time.time()
         if self.delete_old_on_startup:
@@ -458,6 +476,9 @@ class CCTVSystem:
                         f"Camera reconnect failed; retrying in {self._reconnect_backoff:.1f}s..."
                     )
                     self._reconnect_backoff = min(self._reconnect_backoff * 2, 30.0)
+                    # Re-run AUTO detection on the next attempt: device indices
+                    # may have changed across a replug/re-enumeration.
+                    self._auto_resolved = not (self._auto_device or self._auto_night_device)
                 continue
 
             with self._cap_lock:
@@ -580,6 +601,130 @@ class CCTVSystem:
             return max(0, val)
         return 0
 
+    # ------------------------------------------------------------------
+    # AUTO camera detection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _enumerate_video_devices() -> list[int]:
+        """Return sorted indices of /dev/videoN nodes (Linux only)."""
+        devices: list[int] = []
+        for path in Path("/dev").glob("video[0-9]*"):
+            with contextlib.suppress(ValueError):
+                devices.append(int(path.name[len("video") :]))
+        return sorted(set(devices))
+
+    @staticmethod
+    def _v4l2_device_caps(index: int) -> tuple[str, bool] | None:
+        """Return (card name, has_video_capture) for /dev/video<index>.
+
+        Uses VIDIOC_QUERYCAP so non-camera nodes (bcm2835 codec/ISP devices,
+        UVC metadata nodes) can be skipped before opening. None when the
+        device does not answer.
+        """
+        import fcntl
+        import struct
+
+        VIDIOC_QUERYCAP = 0x80685600  # noqa: N806  # _IOR('V', 0, struct v4l2_capability)
+        try:
+            with open(f"/dev/video{index}", "rb", buffering=0) as fd:
+                buf = bytearray(104)
+                fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf, True)
+        except OSError:
+            return None
+        card = bytes(buf[16:48]).split(b"\0", 1)[0].decode("utf-8", "ignore").strip()
+        device_caps = struct.unpack_from("I", buf, 88)[0]
+        return card, bool(device_caps & 0x00000001)  # V4L2_CAP_VIDEO_CAPTURE
+
+    @staticmethod
+    def _frame_color_score(frame: np.ndarray) -> float:
+        """Score how colorful a frame is: 0 for monochrome, higher for color."""
+        if frame.ndim == 2:
+            return 0.0
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        return float(np.percentile(hsv[..., 1], 95))
+
+    def _probe_device_score(self, device: int) -> float | None:
+        """Open a device briefly and score its color-ness.
+
+        Returns None when the node cannot deliver frames (metadata node,
+        busy device, codec node). The 95th percentile of the HSV saturation
+        channel is used so a dark scene on a color camera is not mistaken
+        for a monochrome sensor.
+        """
+        cap: cv2.VideoCapture | None = None
+        try:
+            cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                return None
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, _AUTO_PROBE_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _AUTO_PROBE_HEIGHT)
+            frame: np.ndarray | None = None
+            for _ in range(_AUTO_PROBE_FRAMES):
+                ok, candidate = cap.read()
+                if not ok or candidate is None:
+                    break
+                frame = candidate
+            if frame is None:
+                return None
+            return self._frame_color_score(frame)
+        except Exception:
+            return None
+        finally:
+            if cap is not None:
+                cap.release()
+
+    def _resolve_auto_devices(self) -> bool:
+        """Probe all V4L2 capture devices and assign day/night cameras.
+
+        The day camera is the most colorful one; the night camera is a
+        clearly monochrome one (true IR/mono sensor), if present. Detection
+        is content-based, so it survives USB enumeration order changes
+        across reboots. Returns False when no working camera is found.
+        """
+        scores: dict[int, float] = {}
+        seen_names: set[str] = set()
+        for index in self._enumerate_video_devices():
+            caps = self._v4l2_device_caps(index)
+            if caps is not None:
+                name, is_capture = caps
+                if not is_capture:
+                    continue
+                if name in seen_names:
+                    continue  # second node of the same physical camera
+                seen_names.add(name)
+            score = self._probe_device_score(index)
+            if score is None:
+                continue
+            scores[index] = score
+            label = caps[0] if caps else "unknown"
+            logger.info(f"AUTO camera: /dev/video{index} ({label}) color score {score:.1f}")
+
+        if not scores:
+            logger.warning("AUTO camera: no working camera found.")
+            return False
+
+        if self._auto_device:
+            day = max(scores, key=lambda d: scores[d])
+            self.device = day
+            logger.info(f"AUTO camera: day camera → /dev/video{day} (score {scores[day]:.1f})")
+
+        if self._auto_night_device:
+            day_index = self.device if isinstance(self.device, int) else None
+            others = {d: s for d, s in scores.items() if d != day_index}
+            night = min(others, key=lambda d: others[d]) if others else None
+            if night is not None and others[night] <= _AUTO_MONO_SCORE:
+                self.night_device = night
+                logger.info(f"AUTO camera: night camera → /dev/video{night} (monochrome)")
+            else:
+                self.night_device = None
+                logger.info(
+                    "AUTO camera: no monochrome camera found; "
+                    "night mode will use software enhancement"
+                )
+
+        return True
+
     def _open_device(
         self,
         device: int | str,
@@ -644,6 +789,11 @@ class CCTVSystem:
 
     def _open_capture(self) -> bool:
         """Open the camera matching current mode, falling back to alternate if needed."""
+        if not self._auto_resolved:
+            self._auto_resolved = self._resolve_auto_devices()
+            if not self._auto_resolved:
+                logger.warning("AUTO camera detection found no usable camera yet; will retry.")
+                return False
         if self.night_mode and self.night_device is not None:
             primary_device = self.night_device
             primary_w, primary_h, primary_fps = (
@@ -858,7 +1008,13 @@ class CCTVSystem:
         # Dump pre-buffer for motion-triggered recordings only
         with self._state_lock:
             manual_chat_id = self._manual_record_chat_id
+        self._prebuffer_span = 0.0
         if not manual_chat_id:
+            # The dumped frames were captured over len/rate seconds before
+            # recording_started; remember that span so the duration fix can
+            # include it. Zero frames (e.g. a max-duration rollover segment)
+            # add nothing.
+            self._prebuffer_span = len(self._pre_buffer) / max(self.measured_fps, 1.0)
             for encoded in self._pre_buffer:
                 decoded = cv2.imdecode(np.frombuffer(encoded, np.uint8), cv2.IMREAD_COLOR)
                 if decoded is not None:
@@ -920,12 +1076,18 @@ class CCTVSystem:
                     daemon=True,
                 ).start()
             else:
-                size = self.recording_path.stat().st_size
-                logger.info(
-                    f"Recording saved: {self.recording_path.name} ({self._human_size(size)})"
-                )
-                self._maybe_send_telegram(self.recording_path)
-                self._maybe_upload_cloud(self.recording_path)
+                # Finalize motion recordings in the background so the capture
+                # loop is not blocked by ffmpeg duration fixing + uploads.
+                # Include the real-time span of the dumped pre-motion buffer.
+                duration = actual_duration + self._prebuffer_span
+                frames_written = self._frames_written
+                writer_fps = self._writer_fps
+                path = self.recording_path
+                threading.Thread(
+                    target=self._finalize_motion_recording,
+                    args=(path, duration, frames_written, writer_fps),
+                    daemon=True,
+                ).start()
 
             self.recording_path = None
         self.is_recording = False
@@ -1025,6 +1187,23 @@ class CCTVSystem:
                 logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
         finally:
             self._manual_finalize_done.set()
+
+    def _finalize_motion_recording(
+        self,
+        path: Path,
+        actual_duration: float,
+        frames_written: int,
+        writer_fps: float,
+    ) -> None:
+        """Fix duration and dispatch a motion recording without blocking the main loop."""
+        try:
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+            size = path.stat().st_size
+            logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+            self._maybe_send_telegram(path)
+            self._maybe_upload_cloud(path)
+        except Exception as e:
+            logger.error(f"Failed to finalize motion recording {path.name}: {e}")
 
     # ------------------------------------------------------------------
     # Streaming

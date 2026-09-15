@@ -292,6 +292,41 @@ def test_fix_video_duration_and_manual_recording(cctv_sys, tmp_path):
         assert mock_send.called
 
 
+def test_motion_recording_finalize_fixes_duration(cctv_sys, tmp_path):
+    """Motion recordings must also get the wall-clock duration fix."""
+    video = tmp_path / "motion_test.avi"
+    video.write_bytes(b"VIDEO_DATA")
+
+    cctv_sys.recording_path = video
+    cctv_sys.is_recording = True
+    cctv_sys.recording_started = time.time() - 4.0
+    cctv_sys._frames_written = 30
+    cctv_sys._writer_fps = 15.0
+    cctv_sys._prebuffer_span = 1.0
+
+    def _run_inline(target, args=(), **kwargs):
+        target(*args)
+        return MagicMock()
+
+    with (
+        patch("cheapsecurity.cctv.threading.Thread", side_effect=_run_inline),
+        patch.object(cctv_sys, "_fix_video_duration") as mock_fix,
+        patch.object(cctv_sys, "_maybe_send_telegram") as mock_tg,
+        patch.object(cctv_sys, "_maybe_upload_cloud") as mock_cloud,
+    ):
+        cctv_sys._stop_recording()
+
+    assert cctv_sys.is_recording is False
+    assert mock_fix.called
+    _, duration, frames, fps = mock_fix.call_args.args
+    # actual_duration plus the pre-motion buffer span
+    assert duration >= 4.0 + 1.0 - 0.5
+    assert frames == 30
+    assert fps == 15.0
+    assert mock_tg.called
+    assert mock_cloud.called
+
+
 @patch("cv2.VideoCapture")
 def test_camera_switching_and_release(mock_vcap, cctv_sys):
     mock_cap_instance = MagicMock()
