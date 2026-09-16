@@ -114,6 +114,9 @@ class CCTVSystem:
             None if raw_night_device is None or self._auto_night_device else raw_night_device
         )
         self._auto_resolved = not (self._auto_device or self._auto_night_device)
+        # Set while a day/night camera switch is in progress so the capture
+        # loop's reconnect logic does not open a camera concurrently.
+        self._switching = False
         self.night_device_width: int = self._parse_dim(cam.get("night_device_width", self.width))
         self.night_device_height: int = self._parse_dim(cam.get("night_device_height", self.height))
         self.night_device_fps: int = cam.get("night_device_fps", self.fps)
@@ -403,6 +406,15 @@ class CCTVSystem:
         """True when the optional IR/night camera is currently in use."""
         return self.night_device is not None and self._active_device == self.night_device
 
+    def _active_camera_description(self) -> str:
+        """Short user-facing description of the currently open camera."""
+        dev = self._active_device
+        path = dev if isinstance(dev, str) else f"/dev/video{dev}"
+        if self.night_device is None:
+            return f"{path} (no IR camera detected — software night mode only)"
+        label = "night/IR" if self.night_device_active else "day"
+        return f"{label} camera ({path})"
+
     def _save_config(self) -> None:
         with self._config_lock:
             temp_path = Path(self.config_path).with_suffix(".tmp")
@@ -468,6 +480,11 @@ class CCTVSystem:
 
             # Reconnect if the camera was released (e.g. by too many frame failures)
             if self.cap is None:
+                # A day/night switch temporarily releases the camera; wait for
+                # it instead of opening a camera concurrently.
+                if self._switching:
+                    time.sleep(0.2)
+                    continue
                 # Give the kernel time to re-enumerate the USB camera before retrying.
                 time.sleep(self._reconnect_backoff)
                 with self._cap_lock:
@@ -937,31 +954,35 @@ class CCTVSystem:
             fallback_defaults = False
             fallback_label = "night"
 
-        self._release_capture()
-        cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
-
-        if cap is None and fallback_device is not None:
-            logger.warning(
-                f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
-            )
-            target_device = fallback_device
-            width = fallback_w
-            height = fallback_h
-            fps = fallback_fps
-            save_defaults = fallback_defaults
-            label = fallback_label
+        self._switching = True
+        try:
+            self._release_capture()
             cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
-        if cap is None:
-            logger.error("Camera switch failed; waiting for reconnect loop.")
-            return False
+            if cap is None and fallback_device is not None:
+                logger.warning(
+                    f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
+                )
+                target_device = fallback_device
+                width = fallback_w
+                height = fallback_h
+                fps = fallback_fps
+                save_defaults = fallback_defaults
+                label = fallback_label
+                cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
-        with self._cap_lock:
-            self.cap = cap
-            self._active_device = target_device
-        logger.info(f"Switched to {label} camera (/dev/video{target_device}).")
-        self._apply_camera_night_mode()
-        return True
+            if cap is None:
+                logger.error("Camera switch failed; waiting for reconnect loop.")
+                return False
+
+            with self._cap_lock:
+                self.cap = cap
+                self._active_device = target_device
+            logger.info(f"Switched to {label} camera (/dev/video{target_device}).")
+            self._apply_camera_night_mode()
+            return True
+        finally:
+            self._switching = False
 
     def _release_capture(self) -> None:
         with self._cap_lock:
@@ -1834,18 +1855,25 @@ class CCTVSystem:
         elif cmd[0] == "/night_mode_on":
             self.set_night_mode(True)
             self._send_telegram_message(
-                f"Night mode enabled (strength: {self.night_mode_strength}).", chat_id
+                f"Night mode enabled (strength: {self.night_mode_strength}).\n"
+                f"Using: {self._active_camera_description()}",
+                chat_id,
             )
         elif cmd[0] == "/night_mode_off":
             self.set_night_mode(False)
-            self._send_telegram_message("Night mode disabled.", chat_id)
+            self._send_telegram_message(
+                f"Night mode disabled.\nUsing: {self._active_camera_description()}",
+                chat_id,
+            )
         elif cmd[0] == "/night_mode":
             if len(cmd) > 1 and cmd[1] in _NIGHT_MODE_PROFILES:
                 self.set_night_mode_strength(cmd[1])
                 if not self.night_mode:
                     self.set_night_mode(True)
                 self._send_telegram_message(
-                    f"Night mode enabled with {self.night_mode_strength} strength.", chat_id
+                    f"Night mode enabled with {self.night_mode_strength} strength.\n"
+                    f"Using: {self._active_camera_description()}",
+                    chat_id,
                 )
             else:
                 self._send_telegram_message(

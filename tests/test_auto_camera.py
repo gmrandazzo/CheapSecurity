@@ -184,6 +184,29 @@ class TestResolveAutoDevices:
         assert auto_system._auto_resolved is False
 
 
+class TestActiveCameraDescription:
+    def test_single_camera_mode(self, auto_system):
+        assert auto_system.night_device is None
+        text = auto_system._active_camera_description()
+        assert "/dev/video0" in text
+        assert "no IR camera detected" in text
+
+    def test_day_camera(self, auto_system):
+        auto_system.night_device = 2
+        auto_system._active_device = 0
+        assert auto_system._active_camera_description() == "day camera (/dev/video0)"
+
+    def test_night_camera(self, auto_system):
+        auto_system.night_device = 2
+        auto_system._active_device = 2
+        assert auto_system._active_camera_description() == "night/IR camera (/dev/video2)"
+
+    def test_string_device_path(self, auto_system):
+        auto_system.night_device = "/dev/cam1"
+        auto_system._active_device = "/dev/cam0"
+        assert auto_system._active_camera_description() == "day camera (/dev/cam0)"
+
+
 class TestOpenCapture:
     def test_open_capture_fails_when_auto_unresolved(self, auto_system, monkeypatch):
         monkeypatch.setattr(auto_system, "_resolve_auto_devices", lambda: False)
