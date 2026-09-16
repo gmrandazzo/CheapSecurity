@@ -39,6 +39,7 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from fractions import Fraction
 from pathlib import Path
 from types import FrameType
 from typing import Any, Optional
@@ -1169,6 +1170,92 @@ class CCTVSystem:
             self.recording_path = None
         self.is_recording = False
 
+    @staticmethod
+    def _patch_avi_fps(path: Path, fps: float) -> bool:
+        """Rewrite the frame rate in an AVI container in place (no re-encode).
+
+        Updates dwMicroSecPerFrame in the 'avih' chunk and dwScale/dwRate in
+        the video stream's 'strh' chunk so the declared duration matches the
+        real capture duration. Lossless and instant; works for AVI files
+        written by OpenCV (MJPG/XVID) without requiring ffmpeg.
+        """
+        frac = Fraction(fps).limit_denominator(1_000_000)
+        usec_per_frame = int(round(1_000_000 / fps))
+        try:
+            with open(path, "r+b") as f:
+                size = path.stat().st_size
+
+                def read_chunk_header(pos: int) -> tuple[bytes, int] | None:
+                    if pos + 8 > size:
+                        return None
+                    f.seek(pos)
+                    header = f.read(8)
+                    if len(header) < 8:
+                        return None
+                    return header[:4], int.from_bytes(header[4:8], "little")
+
+                def patch_strh(strl_pos: int, strl_size: int) -> bool:
+                    pos = strl_pos + 12
+                    end = strl_pos + 8 + strl_size
+                    while pos + 8 <= end:
+                        header = read_chunk_header(pos)
+                        if header is None:
+                            return False
+                        fourcc, csize = header
+                        if fourcc == b"strh":
+                            # dwScale at +20, dwRate at +24 from chunk data start.
+                            f.seek(pos + 8 + 20)
+                            f.write(frac.denominator.to_bytes(4, "little"))
+                            f.write(frac.numerator.to_bytes(4, "little"))
+                            return True
+                        pos += 8 + csize + (csize & 1)
+                    return False
+
+                def walk_hdrl(hdrl_pos: int, hdrl_size: int) -> tuple[bool, bool]:
+                    """Patch 'avih' and the first 'strl' inside hdrl."""
+                    patched_avih = False
+                    patched_strh = False
+                    pos = hdrl_pos + 12
+                    end = hdrl_pos + 8 + hdrl_size
+                    while pos + 8 <= end:
+                        header = read_chunk_header(pos)
+                        if header is None:
+                            break
+                        fourcc, csize = header
+                        if fourcc == b"avih":
+                            f.seek(pos + 8)
+                            f.write(usec_per_frame.to_bytes(4, "little"))
+                            patched_avih = True
+                        elif fourcc == b"LIST" and not patched_strh:
+                            f.seek(pos + 8)
+                            if f.read(4) == b"strl":
+                                patched_strh = patch_strh(pos, csize)
+                        pos += 8 + csize + (csize & 1)
+                    return patched_avih, patched_strh
+
+                patched_avih = False
+                patched_strh = False
+                pos = 12  # skip RIFF header and the 'AVI ' form type
+                while pos + 8 <= size:
+                    header = read_chunk_header(pos)
+                    if header is None:
+                        break
+                    fourcc, csize = header
+                    if fourcc == b"avih":
+                        f.seek(pos + 8)
+                        f.write(usec_per_frame.to_bytes(4, "little"))
+                        patched_avih = True
+                    elif fourcc == b"LIST":
+                        f.seek(pos + 8)
+                        if f.read(4) == b"hdrl":
+                            a, s = walk_hdrl(pos, csize)
+                            patched_avih = patched_avih or a
+                            patched_strh = patched_strh or s
+                    pos += 8 + csize + (csize & 1)
+                return patched_avih and patched_strh
+        except OSError:
+            return False
+
     def _fix_video_duration(
         self,
         path: Path,
@@ -1179,9 +1266,11 @@ class CCTVSystem:
         """Adjust container frame rate so playback length matches wall-clock time.
 
         OpenCV's VideoWriter uses the loop's estimated FPS when the file is
-        created. If the capture rate drops during recording (e.g., slow disk
-        I/O), the saved file can play back too fast. Rewriting the container
-        header with the actual FPS (frame_count / actual_duration) fixes this.
+        created. If the capture rate drops during recording (e.g. CPU load on
+        a small board), the saved file plays back too fast. Rewriting the
+        container header with the actual FPS (frame_count / actual_duration)
+        fixes this. AVI files are patched in place without re-encoding; other
+        containers fall back to an ffmpeg re-encode when available.
         """
         frames_written = frames_written if frames_written is not None else self._frames_written
         writer_fps = writer_fps if writer_fps is not None else self._writer_fps
@@ -1196,6 +1285,15 @@ class CCTVSystem:
 
         correct_fps = frames_written / actual_duration
         correct_fps = max(1.0, min(60.0, correct_fps))
+
+        if path.suffix.lower() == ".avi":
+            if self._patch_avi_fps(path, correct_fps):
+                logger.info(
+                    f"Fixed video FPS from {writer_fps:.2f} to {correct_fps:.2f} "
+                    f"({frames_written} frames / {actual_duration:.2f}s, AVI header)"
+                )
+                return
+            logger.warning("AVI header patch failed; falling back to ffmpeg re-encode.")
 
         if not shutil.which("ffmpeg"):
             logger.warning(

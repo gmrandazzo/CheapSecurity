@@ -595,7 +595,7 @@ You need **FFmpeg** and **MediaMTX**.
 
 > **Note:** The commands below use `sudo`. If your board's root access is via `su` instead, run `su` first and execute the commands without `sudo`.
 
-- **FFmpeg** must be installed (`ffmpeg -version`). It is also used for the video-duration fix.
+- **FFmpeg** must be installed (`ffmpeg -version`). It is also an optional fallback for fixing the duration of non-AVI recordings (AVI clips are corrected in place, no ffmpeg needed).
 - **MediaMTX** can be installed in several ways:
 
 #### Option A — download a prebuilt binary (fastest)
