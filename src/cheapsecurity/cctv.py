@@ -244,6 +244,11 @@ class CCTVSystem:
         # matches wall-clock recording duration.
         self.measured_fps: float = float(self.fps) if self.fps > 0 else 15.0
         self._frame_times: deque = deque()
+        # Sustained recording rate learned per device (frames / wall-clock
+        # seconds of finalized clips). The loop runs slower while recording
+        # than when idle, so the next clip on the same camera is stamped with
+        # the learned rate instead of the idle estimate.
+        self._learned_record_fps: dict[tuple[str, int | str], float] = {}
 
         pre_size = int(self.measured_fps * self.pre_buffer_seconds)
         self._pre_buffer: deque = deque(maxlen=max(pre_size, 1))
@@ -1099,14 +1104,28 @@ class CCTVSystem:
                     self._write_frame(decoded)
         self._pre_buffer.clear()
 
+    @staticmethod
+    def _device_key(device: int | str) -> tuple[str, int | str]:
+        """Stable lookup key for per-device state."""
+        return ("path", device) if isinstance(device, str) else ("idx", device)
+
     def _create_writer(self, path: str, width: int, height: int) -> Optional["cv2.VideoWriter"]:
-        # Use measured loop FPS so playback duration matches wall-clock time.
-        writer_fps = max(1.0, min(60.0, self.measured_fps))
+        # Prefer the sustained rate learned from the last finalized clip on
+        # this camera (the loop runs slower while recording than when idle);
+        # until then, fall back to the current measured loop rate.
+        learned = self._learned_record_fps.get(self._device_key(self._active_device))
+        if learned:
+            writer_fps = learned
+            source = "learned"
+        else:
+            writer_fps = self.measured_fps
+            source = "measured"
+        writer_fps = max(1.0, min(60.0, writer_fps))
         self._writer_fps = writer_fps
         fourcc = cv2.VideoWriter.fourcc(*self.codec_fourcc)
         writer = cv2.VideoWriter(path, fourcc, writer_fps, (width, height))
         if writer.isOpened():
-            logger.info(f"Video writer created at {writer_fps:.2f} fps")
+            logger.info(f"Video writer created at {writer_fps:.2f} fps ({source})")
             return writer
 
         # Fallbacks for embedded/ARM boards where codec support varies
@@ -1119,7 +1138,7 @@ class CCTVSystem:
             writer = cv2.VideoWriter(fallback_path, fourcc, writer_fps, (width, height))
             if writer.isOpened():
                 self.recording_path = Path(fallback_path)
-                logger.info(f"Video writer created at {writer_fps:.2f} fps ({codec})")
+                logger.info(f"Video writer created at {writer_fps:.2f} fps ({codec}, {source})")
                 return writer
 
         return None
@@ -1147,10 +1166,11 @@ class CCTVSystem:
                 frames_written = self._frames_written
                 writer_fps = self._writer_fps
                 path = self.recording_path
+                device = self._active_device
                 self._manual_finalize_done.clear()
                 threading.Thread(
                     target=self._finalize_manual_recording,
-                    args=(path, manual_chat_id, actual_duration, frames_written, writer_fps),
+                    args=(path, manual_chat_id, actual_duration, frames_written, writer_fps, device),
                     daemon=True,
                 ).start()
             else:
@@ -1161,9 +1181,10 @@ class CCTVSystem:
                 frames_written = self._frames_written
                 writer_fps = self._writer_fps
                 path = self.recording_path
+                device = self._active_device
                 threading.Thread(
                     target=self._finalize_motion_recording,
-                    args=(path, duration, frames_written, writer_fps),
+                    args=(path, duration, frames_written, writer_fps, device),
                     daemon=True,
                 ).start()
 
@@ -1262,6 +1283,7 @@ class CCTVSystem:
         actual_duration: float,
         frames_written: int | None = None,
         writer_fps: float | None = None,
+        device: int | str | None = None,
     ) -> None:
         """Adjust container frame rate so playback length matches wall-clock time.
 
@@ -1277,14 +1299,18 @@ class CCTVSystem:
         if actual_duration <= 0 or frames_written <= 0 or writer_fps <= 0:
             return
 
+        # Learn the sustained rate of this camera from every finalized clip
+        # (also when drift is small) so the next clip is stamped correctly.
+        correct_fps = frames_written / actual_duration
+        correct_fps = max(1.0, min(60.0, correct_fps))
+        if device is not None and actual_duration >= 1.0:
+            self._learned_record_fps[self._device_key(device)] = correct_fps
+
         playback_duration = frames_written / writer_fps
         drift = abs(playback_duration - actual_duration)
         # Only fix if the drift is meaningful (more than half a second or 10%)
         if drift < 0.5 and drift / max(actual_duration, 1.0) < 0.1:
             return
-
-        correct_fps = frames_written / actual_duration
-        correct_fps = max(1.0, min(60.0, correct_fps))
 
         if path.suffix.lower() == ".avi":
             if self._patch_avi_fps(path, correct_fps):
@@ -1349,10 +1375,11 @@ class CCTVSystem:
         actual_duration: float,
         frames_written: int,
         writer_fps: float,
+        device: int | str,
     ) -> None:
         """Fix duration and upload a manual recording without blocking the main loop."""
         try:
-            self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
             size = path.stat().st_size
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
             try:
@@ -1369,10 +1396,11 @@ class CCTVSystem:
         actual_duration: float,
         frames_written: int,
         writer_fps: float,
+        device: int | str,
     ) -> None:
         """Fix duration and dispatch a motion recording without blocking the main loop."""
         try:
-            self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
             size = path.stat().st_size
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
             self._maybe_send_telegram(path)

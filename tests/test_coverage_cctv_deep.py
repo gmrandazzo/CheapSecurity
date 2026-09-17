@@ -288,7 +288,9 @@ def test_fix_video_duration_and_manual_recording(cctv_sys, tmp_path):
     assert cctv_sys._manual_recording_active is True
 
     with patch("cheapsecurity.cctv.CCTVSystem._send_telegram_video") as mock_send:
-        cctv_sys._finalize_manual_recording(video, chat_id="12345", actual_duration=5.0, frames_written=75, writer_fps=15.0)
+        cctv_sys._finalize_manual_recording(
+            video, chat_id="12345", actual_duration=5.0, frames_written=75, writer_fps=15.0, device=0
+        )
         assert mock_send.called
 
 
@@ -318,11 +320,12 @@ def test_motion_recording_finalize_fixes_duration(cctv_sys, tmp_path):
 
     assert cctv_sys.is_recording is False
     assert mock_fix.called
-    _, duration, frames, fps = mock_fix.call_args.args
+    _, duration, frames, fps, device = mock_fix.call_args.args
     # actual_duration plus the pre-motion buffer span
     assert duration >= 4.0 + 1.0 - 0.5
     assert frames == 30
     assert fps == 15.0
+    assert device == 0
     assert mock_tg.called
     assert mock_cloud.called
 
