@@ -1146,6 +1146,10 @@ class CCTVSystem:
         drift = abs(playback_duration - actual_duration)
 
         if drift < 0.5 and drift / max(actual_duration, 1.0) < 0.1:
+            logger.info(
+                f"Video duration OK: {actual_duration:.2f}s, drift {drift:.2f}s "
+                f"(stamped {writer_fps:.2f} fps, no fix needed)"
+            )
             return
 
         if path.suffix.lower() == ".avi":
@@ -1213,8 +1217,11 @@ class CCTVSystem:
             self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
             size = path.stat().st_size
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+            caption = self._recording_caption(
+                "🎥 Manual video", path, actual_duration, frames_written, writer_fps
+            )
             try:
-                self._send_telegram_video(path, chat_id=chat_id)
+                self._send_telegram_video(path, chat_id=chat_id, caption=caption)
                 self._maybe_upload_cloud(path)
             except Exception as e:
                 logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
@@ -1233,7 +1240,10 @@ class CCTVSystem:
             self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
             size = path.stat().st_size
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
-            self._maybe_send_telegram(path)
+            caption = self._recording_caption(
+                "🎥 Motion", path, actual_duration, frames_written, writer_fps
+            )
+            self._maybe_send_telegram(path, caption=caption)
             self._maybe_upload_cloud(path)
         except Exception as e:
             logger.error(f"Failed to finalize motion recording {path.name}: {e}")
@@ -1342,7 +1352,7 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"Failed to send alert email: {e}")
 
-    def _maybe_send_telegram(self, video_path: Path) -> None:
+    def _maybe_send_telegram(self, video_path: Path, caption: str | None = None) -> None:
         if not self.telegram_enabled:
             return
         if not self.telegram_token or not self.telegram_chat_id:
@@ -1360,6 +1370,7 @@ class CCTVSystem:
         threading.Thread(
             target=self._send_telegram_video,
             args=(video_path,),
+            kwargs={"caption": caption},
             daemon=True,
         ).start()
 
@@ -1432,7 +1443,19 @@ class CCTVSystem:
                 return
         logger.error(f"Failed to send Telegram document after {max_retries} attempts")
 
-    def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
+    @staticmethod
+    def _recording_caption(
+        label: str, path: Path, actual_duration: float, frames_written: int, writer_fps: float
+    ) -> str:
+        real_fps = frames_written / actual_duration if actual_duration > 0 else 0.0
+        return (
+            f"{label}: {actual_duration:.1f}s — {frames_written} frames "
+            f"@ {real_fps:.1f} fps (stamped {writer_fps:.1f})\nFile: {path.name}"
+        )
+
+    def _send_telegram_video(
+        self, video_path: Path, chat_id: str | None = None, caption: str | None = None
+    ) -> None:
         target_chat = chat_id or self.telegram_chat_id
         if not target_chat:
             return
@@ -1451,7 +1474,8 @@ class CCTVSystem:
 
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
+        if caption is None:
+            caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
 
         max_retries = 3
         backoff = 1.0
