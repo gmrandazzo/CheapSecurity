@@ -724,17 +724,19 @@ class CCTVSystem:
         actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        fmt_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fmt_str = "".join(chr((fmt_int >> (8 * i)) & 0xFF) for i in range(4))
         if actual_fps > 0:
             self.actual_fps = actual_fps
         else:
             self.actual_fps = fps
         if width <= 0 or height <= 0:
             logger.info(
-                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps [{fmt_str}]"
             )
         else:
             logger.info(
-                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps [{fmt_str}]"
             )
 
         if save_defaults:
@@ -976,7 +978,7 @@ class CCTVSystem:
         else:
             writer_fps = self.measured_fps
             source = "measured"
-        writer_fps = max(1.0, min(60.0, writer_fps))
+        writer_fps = max(0.1, min(60.0, writer_fps))
         self._writer_fps = writer_fps
         fourcc = cv2.VideoWriter.fourcc(*self.codec_fourcc)
         writer = cv2.VideoWriter(path, fourcc, writer_fps, (width, height))
@@ -1138,7 +1140,7 @@ class CCTVSystem:
             return
 
         correct_fps = frames_written / actual_duration
-        correct_fps = max(1.0, min(60.0, correct_fps))
+        correct_fps = max(0.1, min(60.0, correct_fps))
         if device is not None and actual_duration >= 1.0:
             self._learned_record_fps[self._device_key(device)] = correct_fps
 

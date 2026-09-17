@@ -82,6 +82,19 @@ def test_create_writer_prefers_learned_fps(patched_config, tmp_path):
     assert system._writer_fps == 12.0
 
 
+def test_fix_video_duration_supports_sub_1fps(patched_config, tmp_path):
+    system = CCTVSystem(patched_config)
+    video = tmp_path / "t.avi"
+    _write_test_avi(video, fps=30.0, frames=7)
+
+    # 7 frames over 10s real -> 0.7 fps (slow night camera in the dark).
+    system._fix_video_duration(video, actual_duration=10.0, frames_written=7, writer_fps=30.0)
+
+    fps, frames = _read_fps_and_frames(video)
+    assert abs(fps - 0.7) < 0.05
+    assert frames == 7
+
+
 def test_create_writer_falls_back_to_measured_fps(patched_config, tmp_path):
     system = CCTVSystem(patched_config)
     system.measured_fps = 14.0
