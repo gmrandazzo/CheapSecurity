@@ -1,12 +1,8 @@
-"""Test helpers."""
-
 import cv2
 import numpy as np
 
 
 class FakeCapture:
-    """Fake cv2.VideoCapture for unit tests."""
-
     def __init__(self, width=640, height=480, fps=15):
         self._width = width
         self._height = height

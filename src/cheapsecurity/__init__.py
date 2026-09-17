@@ -7,6 +7,5 @@
 # by the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-"""CheapSecurity CCTV package."""
 
 __version__ = "1.1.0"

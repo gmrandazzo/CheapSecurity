@@ -1,5 +1,3 @@
-"""Unit tests for cheapsecurity.cctv."""
-
 import json
 import time
 from pathlib import Path
@@ -38,9 +36,7 @@ class TestEnvSecretOverrides:
     def test_env_overrides_secrets(self, config_dict, tmp_path, monkeypatch):
         config_path = tmp_path / "config.json"
         config_path.write_text(json.dumps(config_dict))
-        monkeypatch.setattr(
-            "cv2.VideoCapture", lambda *args, **kwargs: FakeCapture()
-        )
+        monkeypatch.setattr("cv2.VideoCapture", lambda *args, **kwargs: FakeCapture())
         monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_BOT_TOKEN", "env_token")
         monkeypatch.setenv("CHEAPSECURITY_TELEGRAM_CHAT_ID", "env_chat_id")
         monkeypatch.setenv("CHEAPSECURITY_SMTP_PASSWORD", "env_smtp_pass")
@@ -161,7 +157,7 @@ class TestMotionDetection:
         frame1 = np.zeros((100, 100, 3), dtype=np.uint8)
         frame2 = np.ones((100, 100, 3), dtype=np.uint8) * 255
         system._detect_motion(frame1)
-        # The whole frame changed but min_area is larger than the frame area
+
         assert system._detect_motion(frame2) is False
 
 
@@ -176,7 +172,7 @@ class TestStorageCleanup:
     def test_cleanup_deletes_old_files(self, system, temp_recordings):
         old_file = temp_recordings / "motion_20200101_120000.avi"
         old_file.write_bytes(b"old")
-        # Set mtime far in the past
+
         old_time = time.time() - 86400 * 365
         old_file.touch()
         import os
@@ -501,12 +497,10 @@ class TestTelegramMessageStore:
             int(1280 * system.motion_scale),
         )
 
-        # First frame initializes _prev_gray
         system._detect_motion(frame_large)
         assert system._prev_gray is not None
         assert system._prev_gray.shape == expected_large_shape
 
-        # Switching resolution should not crash cv2.absdiff
         res = system._detect_motion(frame_small)
         assert res is False
         assert system._prev_gray.shape == expected_small_shape

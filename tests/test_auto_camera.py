@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for AUTO camera detection (camera.device / camera.night_device = "auto").
-"""
 
 import json
 
@@ -14,7 +11,6 @@ from cheapsecurity.cctv import CCTVSystem
 
 @pytest.fixture
 def auto_config_path(config_dict, tmp_path):
-    """A config file with AUTO device selection enabled."""
     config_dict["camera"]["device"] = "auto"
     config_dict["camera"]["night_device"] = "auto"
     config_dict["recording"]["dir"] = str(tmp_path / "recordings")
@@ -29,12 +25,6 @@ def auto_system(auto_config_path):
 
 
 def _patch_probing(monkeypatch, system, devices, probes, caps=None):
-    """Stub out hardware access for _resolve_auto_devices.
-
-    devices: indices returned by enumeration
-    probes:  {index: (score, kind) or None} from probing
-    caps:    {index: (name, is_capture) or None} from VIDIOC_QUERYCAP
-    """
     monkeypatch.setattr(CCTVSystem, "_enumerate_video_devices", staticmethod(lambda: devices))
     monkeypatch.setattr(
         CCTVSystem,
@@ -66,7 +56,7 @@ class TestAnalyzeFrame:
         assert CCTVSystem._analyze_frame(gray) == (0.0, "mono")
 
     def test_neutral_chroma_frame_is_mono(self):
-        # YUYV from a monochrome sensor decodes to equal BGR channels.
+
         bgr_gray = np.full((60, 80, 3), 128, dtype=np.uint8)
         score, kind = CCTVSystem._analyze_frame(bgr_gray)
         assert kind == "mono"
@@ -74,15 +64,15 @@ class TestAnalyzeFrame:
 
     def test_multihue_frame_is_color(self):
         frame = np.zeros((60, 80, 3), dtype=np.uint8)
-        frame[:, :27] = (0, 0, 255)  # red
-        frame[:, 27:54] = (0, 255, 0)  # green
-        frame[:, 54:] = (255, 0, 0)  # blue
+        frame[:, :27] = (0, 0, 255)
+        frame[:, 27:54] = (0, 255, 0)
+        frame[:, 54:] = (255, 0, 0)
         score, kind = CCTVSystem._analyze_frame(frame)
         assert kind == "color"
         assert score > 100.0
 
     def test_single_hue_vivid_frame_is_tinted(self):
-        # IR-cut-removed color sensors show a uniform tint (e.g. all red).
+
         red = np.zeros((60, 80, 3), dtype=np.uint8)
         red[..., 2] = 255
         score, kind = CCTVSystem._analyze_frame(red)
@@ -100,28 +90,21 @@ class TestResolveAutoDevices:
         assert auto_system.night_device == 2
 
     def test_tinted_camera_becomes_night(self, auto_system, monkeypatch):
-        # IR-tinted sensor out-scores the plain color one but must not be day.
-        _patch_probing(
-            monkeypatch, auto_system, [0, 2], {0: (50.0, "color"), 2: (90.0, "tinted")}
-        )
+
+        _patch_probing(monkeypatch, auto_system, [0, 2], {0: (50.0, "color"), 2: (90.0, "tinted")})
         assert auto_system._resolve_auto_devices() is True
         assert auto_system.device == 0
         assert auto_system.night_device == 2
 
-    def test_color_camera_preferred_for_day_even_with_lower_score(
-        self, auto_system, monkeypatch
-    ):
-        # A tinted IR sensor may out-score the plain color camera, but the
-        # color camera must still win the day slot.
-        _patch_probing(
-            monkeypatch, auto_system, [0, 2], {0: (10.0, "color"), 2: (90.0, "tinted")}
-        )
+    def test_color_camera_preferred_for_day_even_with_lower_score(self, auto_system, monkeypatch):
+
+        _patch_probing(monkeypatch, auto_system, [0, 2], {0: (10.0, "color"), 2: (90.0, "tinted")})
         assert auto_system._resolve_auto_devices() is True
         assert auto_system.device == 0
         assert auto_system.night_device == 2
 
     def test_index_shuffle_still_resolves(self, auto_system, monkeypatch):
-        # USB enumeration order changed: color camera is now video4.
+
         _patch_probing(
             monkeypatch, auto_system, [2, 3, 4, 5], {4: (60.0, "color"), 2: (0.0, "mono")}
         )
@@ -130,9 +113,7 @@ class TestResolveAutoDevices:
         assert auto_system.night_device == 2
 
     def test_no_night_camera_uses_single_camera(self, auto_system, monkeypatch):
-        _patch_probing(
-            monkeypatch, auto_system, [0, 2], {0: (55.0, "color"), 2: (48.0, "color")}
-        )
+        _patch_probing(monkeypatch, auto_system, [0, 2], {0: (55.0, "color"), 2: (48.0, "color")})
         assert auto_system._resolve_auto_devices() is True
         assert auto_system.device == 0
         assert auto_system.night_device is None
@@ -161,7 +142,7 @@ class TestResolveAutoDevices:
         assert auto_system.night_device == 2
 
     def test_duplicate_node_names_are_skipped(self, auto_system, monkeypatch):
-        # Same physical camera exposing two capture nodes.
+
         calls = []
 
         def _probe(dev):
@@ -214,9 +195,7 @@ class TestOpenCapture:
         assert auto_system._auto_resolved is False
 
     def test_open_capture_uses_resolved_devices(self, auto_system, monkeypatch):
-        _patch_probing(
-            monkeypatch, auto_system, [0, 2], {0: (55.0, "color"), 2: (0.0, "mono")}
-        )
+        _patch_probing(monkeypatch, auto_system, [0, 2], {0: (55.0, "color"), 2: (0.0, "mono")})
         monkeypatch.setattr("cv2.VideoCapture", lambda *a, **k: FakeCapture(640, 480, 15))
 
         assert auto_system._open_capture() is True

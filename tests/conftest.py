@@ -1,5 +1,3 @@
-"""Shared fixtures for CheapSecurity tests."""
-
 import json
 
 import pytest
@@ -10,7 +8,6 @@ from cheapsecurity.cctv import CCTVSystem
 
 @pytest.fixture
 def config_dict():
-    """Return a minimal valid configuration dictionary."""
     return {
         "camera": {
             "device": 0,
@@ -88,7 +85,6 @@ def config_dict():
 
 @pytest.fixture
 def temp_config(config_dict, tmp_path):
-    """Write a config file to a temp directory and return its path."""
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config_dict))
     return str(config_path)
@@ -96,7 +92,6 @@ def temp_config(config_dict, tmp_path):
 
 @pytest.fixture
 def temp_recordings(tmp_path):
-    """Create an isolated recordings directory."""
     recordings = tmp_path / "recordings"
     recordings.mkdir()
     return recordings
@@ -104,7 +99,6 @@ def temp_recordings(tmp_path):
 
 @pytest.fixture
 def patched_config(config_dict, temp_recordings, tmp_path):
-    """Return a config dict using temp recordings dir, already written to disk."""
     config_dict["recording"]["dir"] = str(temp_recordings)
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config_dict))
@@ -118,7 +112,6 @@ def fake_capture():
 
 @pytest.fixture
 def system(patched_config, monkeypatch):
-    """Build a CCTVSystem with a fake camera but do not start the main loop."""
     monkeypatch.setattr("cv2.VideoCapture", lambda *args, **kwargs: FakeCapture(640, 480, 15))
     system = CCTVSystem(patched_config)
     yield system

@@ -101,11 +101,10 @@ def _check_auth() -> Response | None:
     auth_cfg = (cctv.cfg.get("web") or {}).get("auth") if cctv else None
     if not auth_cfg or not auth_cfg.get("enabled"):
         return None
-    # Allow the local RTSP publisher (FFmpeg) to read the MJPEG stream
-    # without credentials when auth is enabled.
+
     if request.path == "/video_feed" and request.remote_addr in ("127.0.0.1", "::1"):
         return None
-    # Swagger UI and its static assets / OpenAPI spec must be reachable.
+
     if (
         request.path == "/api/"
         or request.path.startswith("/flasgger_static")
@@ -151,10 +150,10 @@ def _get_csrf_token() -> str:
 def require_csrf() -> Response | None:
     if request.method in _CSRF_SAFE_METHODS:
         return None
-    # Accept a per-session CSRF token (used by the dashboard)...
+
     if request.headers.get("X-CSRF-Token") == _get_csrf_token():
         return None
-    # ...or the standard XMLHttpRequest header (used by API clients/tests).
+
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return None
     resp = make_response(jsonify({"error": "CSRF protection: missing or invalid token"}))
@@ -342,7 +341,6 @@ def api_delete_recordings() -> RouteReturn:
     for name in filenames:
         path = cctv.record_dir / name
         try:
-            # Security: ensure the resolved path is still inside the recordings directory
             if path.resolve().parent != cctv.record_dir.resolve() or not path.is_file():
                 results.append({"filename": name, "deleted": False, "error": "Invalid file"})
                 continue
@@ -474,7 +472,7 @@ def api_send_telegram_recordings() -> RouteReturn:
             if path.resolve().parent != cctv.record_dir.resolve() or not path.is_file():
                 results.append({"filename": name, "sent": False, "error": "Invalid file"})
                 continue
-            # Async upload in background thread to avoid blocking the single-worker Gunicorn server
+
             threading.Thread(
                 target=cctv._send_telegram_video,
                 args=(path,),
@@ -1033,9 +1031,8 @@ def video_feed() -> RouteReturn:
         while True:
             frame = cctv.get_frame()
             if frame:
-                yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-                # Pace the MJPEG stream to the camera's actual rate instead of
-                # spinning as fast as the network allows on the same frame.
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+
                 fps = max(1.0, cctv.actual_fps) if cctv else 1.0
                 time.sleep(1.0 / fps)
             else:

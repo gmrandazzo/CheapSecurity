@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""RTSP output publisher using MediaMTX + FFmpeg.
-
-Reads the existing HTTP MJPEG stream and republishes it as an RTSP stream
-that clients such as VLC or IP-camera viewers can consume.
-"""
 
 import logging
 import shutil
@@ -18,8 +13,6 @@ logger = logging.getLogger("cctv")
 
 
 class RTSPPublisher:
-    """Manage an external MediaMTX server and an FFmpeg republisher process."""
-
     def __init__(
         self,
         cfg: dict[str, Any],
@@ -44,14 +37,12 @@ class RTSPPublisher:
         self._stop_event = threading.Event()
 
     def start(self) -> None:
-        """Start the RTSP publisher in a background thread."""
         if not self.enabled:
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
-        """Signal shutdown and terminate subprocesses."""
         self._stop_event.set()
         self._terminate(self._ffmpeg_proc)
         self._terminate(self._mediamtx_proc)
@@ -63,7 +54,7 @@ class RTSPPublisher:
             if not self._start_mediamtx():
                 return
             self._start_ffmpeg()
-            # Keep thread alive until stop() is called; restart ffmpeg if it dies.
+
             while not self._stop_event.wait(2.0):
                 if self._ffmpeg_proc and self._ffmpeg_proc.poll() is not None:
                     logger.warning("FFmpeg RTSP publisher exited; restarting...")
@@ -74,13 +65,13 @@ class RTSPPublisher:
     def _start_mediamtx(self) -> bool:
         if not shutil.which(self.mediamtx_binary):
             logger.error(
-                f"MediaMTX binary not found: {self.mediamtx_binary}. " "RTSP output disabled."
+                f"MediaMTX binary not found: {self.mediamtx_binary}. RTSP output disabled."
             )
             return False
 
         config_path = Path(self.mediamtx_config)
         if not config_path.is_file():
-            logger.error(f"MediaMTX config not found: {config_path}. " "RTSP output disabled.")
+            logger.error(f"MediaMTX config not found: {config_path}. RTSP output disabled.")
             return False
 
         cmd = [
@@ -94,7 +85,6 @@ class RTSPPublisher:
             stderr=subprocess.DEVNULL,
         )
 
-        # Wait for the RTSP port to become reachable.
         if not self._wait_for_port("127.0.0.1", self.rtsp_port, timeout=10.0):
             logger.error("MediaMTX did not start in time; RTSP output disabled.")
             self._terminate(self._mediamtx_proc)

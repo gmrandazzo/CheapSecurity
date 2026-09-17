@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-CheapSecurity diagnostic script.
-
-Helps troubleshoot why recordings are not being created.
-"""
 
 import json
 import shutil
@@ -19,7 +14,6 @@ def main() -> int:
     print("CheapSecurity Diagnostics")
     print("=" * 60)
 
-    # Load config
     try:
         with open("config.json") as f:
             cfg = json.load(f)
@@ -42,7 +36,6 @@ def main() -> int:
     print(f"Night mode: {cam_cfg.get('night_mode', False)}")
     print(f"Notifications enabled: {notif_cfg.get('enabled', False)}")
 
-    # Check recordings directory
     record_dir = Path(rec_cfg["dir"]).resolve()
     print(f"\nRecordings directory: {record_dir}")
     if record_dir.exists():
@@ -58,7 +51,6 @@ def main() -> int:
     else:
         print("✗ Directory does not exist")
 
-    # Try opening camera
     print("\nTrying to open camera...")
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     if not cap.isOpened():
@@ -78,7 +70,6 @@ def main() -> int:
     print("✓ Camera opened")
     print(f"  Actual resolution: {actual_width}x{actual_height} @ {actual_fps:.1f} fps")
 
-    # Motion detection test
     print("\nRunning 5-second motion detection test...")
     print("Move in front of the camera to see 'MOTION DETECTED' messages.")
 
@@ -89,7 +80,7 @@ def main() -> int:
     prev_gray = None
     motion_count = 0
 
-    for _ in range(50):  # ~5 seconds at 10 fps
+    for _ in range(50):
         ok, frame = cap.read()
         if not ok:
             print("✗ Frame capture failed")

@@ -1,5 +1,3 @@
-"""Unit tests for cheapsecurity.web."""
-
 import base64
 import json
 from unittest.mock import MagicMock
@@ -11,7 +9,6 @@ from cheapsecurity.web import app
 
 @pytest.fixture
 def client(monkeypatch):
-    """Provide a Flask test client with a mocked CCTV system."""
     fake_cctv = MagicMock()
     fake_cctv.cfg = {
         "camera": {"width": 640, "height": 480, "fps": 15},

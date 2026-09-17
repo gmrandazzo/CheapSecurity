@@ -1,5 +1,3 @@
-"""Tests for the Swagger/OpenAPI docs endpoint."""
-
 import json
 
 import pytest
@@ -9,7 +7,6 @@ from cheapsecurity.web import app
 
 @pytest.fixture
 def swagger_client(monkeypatch):
-    """Provide a Flask test client with a mocked CCTV system."""
     from unittest.mock import MagicMock
 
     fake_cctv = MagicMock()

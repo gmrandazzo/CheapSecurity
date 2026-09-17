@@ -15,11 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-CheapSecurity launcher.
-
-Starts the CCTV engine and the web dashboard.
-"""
 
 import os
 import signal

@@ -1,5 +1,3 @@
-"""Unit tests for AES-256 ZIP encryption features."""
-
 import json
 from unittest.mock import MagicMock, patch
 
@@ -15,10 +13,27 @@ def system(tmp_path):
     record_dir.mkdir()
     config = {
         "camera": {"device": 0, "width": 640, "height": 480, "fps": 15},
-        "motion": {"threshold": 25, "min_area": 500, "blur_size": 21, "cooldown_seconds": 5, "scale": 0.5},
-        "recording": {"dir": str(record_dir), "max_duration_seconds": 10, "pre_buffer_seconds": 2, "codec": "MJPG", "extension": ".avi"},
+        "motion": {
+            "threshold": 25,
+            "min_area": 500,
+            "blur_size": 21,
+            "cooldown_seconds": 5,
+            "scale": 0.5,
+        },
+        "recording": {
+            "dir": str(record_dir),
+            "max_duration_seconds": 10,
+            "pre_buffer_seconds": 2,
+            "codec": "MJPG",
+            "extension": ".avi",
+        },
         "notifications": {"enabled": False},
-        "storage": {"max_age_days": 3, "max_size_gb": 10, "cleanup_interval_minutes": 60, "delete_old_on_startup": False},
+        "storage": {
+            "max_age_days": 3,
+            "max_size_gb": 10,
+            "cleanup_interval_minutes": 60,
+            "delete_old_on_startup": False,
+        },
         "web": {"host": "127.0.0.1", "port": 5000},
         "telegram": {
             "enabled": True,
@@ -66,13 +81,11 @@ def test_create_aes_zip_and_extract(system, tmp_path):
     assert zip_path.exists()
     assert zip_path.suffix == ".zip"
 
-    # Extract with correct password
     with pyzipper.AESZipFile(zip_path, "r") as zf:
         zf.setpassword(b"MySuperSecret123")
         extracted_data = zf.read(dummy_file.name)
         assert extracted_data == dummy_content
 
-    # Extraction fails with wrong password
     with pyzipper.AESZipFile(zip_path, "r") as zf:
         zf.setpassword(b"WrongPassword")
         with pytest.raises((RuntimeError, pyzipper.BadZipFile)):
@@ -125,7 +138,6 @@ def test_telegram_encryption_bot_commands(mock_post, system):
     mock_resp.json.return_value = {"ok": True}
     mock_post.return_value = mock_resp
 
-    # Toggle telegram encryption off via command
     update_off = {
         "update_id": 1,
         "message": {"text": "/encrypt_telegram_off", "chat": {"id": 12345}},
@@ -133,7 +145,6 @@ def test_telegram_encryption_bot_commands(mock_post, system):
     system._handle_telegram_update(update_off)
     assert system.encrypt_telegram is False
 
-    # Toggle telegram encryption on via command
     update_on = {
         "update_id": 2,
         "message": {"text": "/encrypt_telegram_on", "chat": {"id": 12345}},
@@ -141,7 +152,6 @@ def test_telegram_encryption_bot_commands(mock_post, system):
     system._handle_telegram_update(update_on)
     assert system.encrypt_telegram is True
 
-    # Check status command
     update_status = {
         "update_id": 3,
         "message": {"text": "/encryption", "chat": {"id": 12345}},

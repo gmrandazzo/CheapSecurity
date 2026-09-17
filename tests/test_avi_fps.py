@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for the pure-Python AVI frame-rate patch (_patch_avi_fps).
-"""
 
 import cv2
 import numpy as np
@@ -35,7 +32,7 @@ def test_patch_avi_fps_updates_rate(tmp_path):
 
     fps, frames = _read_fps_and_frames(video)
     assert abs(fps - 10.0) < 0.5
-    assert frames == 10  # frames must not be touched
+    assert frames == 10
 
 
 def test_patch_avi_fps_fractional_rate(tmp_path):
@@ -53,8 +50,9 @@ def test_fix_video_duration_patches_header(patched_config, tmp_path):
     video = tmp_path / "t.avi"
     _write_test_avi(video, fps=30.0, frames=10)
 
-    # 10 frames stamped at 30 fps look like 0.33s but really took 5s.
-    system._fix_video_duration(video, actual_duration=5.0, frames_written=10, writer_fps=30.0, device=0)
+    system._fix_video_duration(
+        video, actual_duration=5.0, frames_written=10, writer_fps=30.0, device=0
+    )
 
     fps, frames = _read_fps_and_frames(video)
     assert abs(fps - 2.0) < 0.2
@@ -65,12 +63,12 @@ def test_fix_video_duration_patches_header(patched_config, tmp_path):
 def test_fix_video_duration_skips_small_drift(patched_config, tmp_path):
     system = CCTVSystem(patched_config)
     video = tmp_path / "t.avi"
-    _write_test_avi(video, fps=30.0, frames=300)  # ~10s at 30 fps
+    _write_test_avi(video, fps=30.0, frames=300)
 
     system._fix_video_duration(video, actual_duration=10.1, frames_written=300, writer_fps=30.0)
 
     fps, _ = _read_fps_and_frames(video)
-    assert abs(fps - 30.0) < 0.5  # untouched: drift below threshold
+    assert abs(fps - 30.0) < 0.5
 
 
 def test_create_writer_prefers_learned_fps(patched_config, tmp_path):

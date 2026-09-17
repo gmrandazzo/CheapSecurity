@@ -1,5 +1,3 @@
-"""Deep unit tests to reach high test coverage for web.py."""
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -48,11 +46,10 @@ def client(mock_cctv):
 
 
 def test_basic_auth_required_when_enabled(client, mock_cctv):
-    # Missing auth header -> 401
+
     res = client.get("/api/settings")
     assert res.status_code == 401
 
-    # Wrong credentials -> 401
     auth_header = {"Authorization": "Basic " + b"wrong:credentials".hex()}
     res = client.get("/api/settings", headers=auth_header)
     assert res.status_code == 401
@@ -60,12 +57,12 @@ def test_basic_auth_required_when_enabled(client, mock_cctv):
 
 def test_recordings_bulk_actions(client, mock_cctv):
     import base64
+
     valid_auth = {
         "Authorization": "Basic " + base64.b64encode(b"admin:pass").decode("utf-8"),
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    # Bulk ZIP download
     res = client.post(
         "/api/recordings/download",
         json={"filenames": ["clip1.avi", "clip2.avi"]},
@@ -74,7 +71,6 @@ def test_recordings_bulk_actions(client, mock_cctv):
     assert res.status_code == 200
     assert res.content_type == "application/zip"
 
-    # Bulk Delete
     res_del = client.post(
         "/api/recordings/delete",
         json={"filenames": ["clip1.avi"]},
@@ -83,7 +79,6 @@ def test_recordings_bulk_actions(client, mock_cctv):
     assert res_del.status_code == 200
     assert len(res_del.json["results"]) == 1
 
-    # Bulk Telegram Send
     res_tel = client.post(
         "/api/recordings/telegram",
         json={"filenames": ["clip2.avi"]},
@@ -95,6 +90,7 @@ def test_recordings_bulk_actions(client, mock_cctv):
 
 def test_settings_endpoints_post(client, mock_cctv):
     import base64
+
     auth = {
         "Authorization": "Basic " + base64.b64encode(b"admin:pass").decode("utf-8"),
         "X-Requested-With": "XMLHttpRequest",
@@ -137,6 +133,7 @@ def test_uninitialized_cctv_503(client):
 
 def test_telegram_delete_endpoints(client, mock_cctv):
     import base64
+
     auth = {
         "Authorization": "Basic " + base64.b64encode(b"admin:pass").decode("utf-8"),
         "X-Requested-With": "XMLHttpRequest",
@@ -147,24 +144,24 @@ def test_telegram_delete_endpoints(client, mock_cctv):
     assert res.status_code == 200
     assert res.json["deleted"] is True
 
-    res_range = client.post("/api/telegram/delete_range", json={"min_id": 100, "max_id": 105}, headers=auth)
+    res_range = client.post(
+        "/api/telegram/delete_range", json={"min_id": 100, "max_id": 105}, headers=auth
+    )
     assert res_range.status_code == 200
     assert res_range.json["deleted"] == 6
 
 
 def test_video_download_and_mjpeg_stream(client, mock_cctv):
     import base64
+
     auth = {"Authorization": "Basic " + base64.b64encode(b"admin:pass").decode("utf-8")}
 
-    # Get single recording file
     res = client.get("/recordings/clip1.avi", headers=auth)
     assert res.status_code in (200, 206)
 
-    # Get non-existent recording file -> 404
     res_404 = client.get("/recordings/nonexistent.avi", headers=auth)
     assert res_404.status_code == 404
 
-    # MJPEG stream endpoint /video_feed
     res_stream = client.get("/video_feed", headers=auth)
     assert res_stream.status_code == 200
     assert "multipart/x-mixed-replace" in res_stream.content_type
