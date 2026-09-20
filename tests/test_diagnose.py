@@ -1,5 +1,3 @@
-"""Unit tests for diagnose.py."""
-
 import json
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +8,7 @@ from cheapsecurity.diagnose import main
 
 def test_diagnose_main_missing_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # No config.json exists -> prints error and exits gracefully
+
     main()
 
 

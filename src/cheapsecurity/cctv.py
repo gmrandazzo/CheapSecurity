@@ -15,13 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-CheapSecurity CCTV engine.
-
-Captures video from a V4L2 webcam, detects motion by frame differencing,
-records clips to disk with a pre-motion buffer, and exposes the live feed
-for the web interface.
-"""
 
 import contextlib
 import json
@@ -39,6 +32,7 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from fractions import Fraction
 from pathlib import Path
 from types import FrameType
 from typing import Any, Optional
@@ -56,13 +50,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cctv")
 
-# Night-mode enhancement profiles. Lower clip limits and larger tiles reduce
-# noise amplification; lower gamma values lift shadows more aggressively.
+
 _NIGHT_MODE_PROFILES: dict[str, dict[str, float | int]] = {
     "low": {"gamma": 0.65, "clip_limit": 1.0, "tile_grid": 16},
     "normal": {"gamma": 0.50, "clip_limit": 2.0, "tile_grid": 12},
     "aggressive": {"gamma": 0.35, "clip_limit": 3.0, "tile_grid": 8},
 }
+
+
+_AUTO_PROBE_WIDTH = 320
+_AUTO_PROBE_HEIGHT = 240
+_AUTO_PROBE_FRAMES = 15
+_AUTO_PROBE_SETTLE_S = 0.3
+_AUTO_PROBE_MAX_FAILURES = 8
+_AUTO_VIVID_SATURATION = 60
+_AUTO_TINT_MIN_VIVID_FRACTION = 0.02
+_AUTO_TINT_MAX_HUE_BINS = 2
+_AUTO_HUE_BIN_WIDTH = 10
 
 
 class CCTVSystem:
@@ -72,7 +76,9 @@ class CCTVSystem:
             self.cfg = json.load(f)
 
         cam = self.cfg["camera"]
-        self.device = cam["device"]
+        raw_device = cam["device"]
+        self._auto_device = isinstance(raw_device, str) and raw_device.strip().lower() == "auto"
+        self.device: int | str = 0 if self._auto_device else raw_device
         self.width = self._parse_dim(cam.get("width", 2560))
         self.height = self._parse_dim(cam.get("height", 1440))
         self.fps = cam["fps"]
@@ -89,8 +95,16 @@ class CCTVSystem:
         if self.night_mode_strength not in _NIGHT_MODE_PROFILES:
             self.night_mode_strength = "normal"
 
-        # Optional second camera used when night mode is enabled.
-        self.night_device: int | str | None = cam.get("night_device")
+        raw_night_device = cam.get("night_device")
+        self._auto_night_device = (
+            isinstance(raw_night_device, str) and raw_night_device.strip().lower() == "auto"
+        )
+        self.night_device: int | str | None = (
+            None if raw_night_device is None or self._auto_night_device else raw_night_device
+        )
+        self._auto_resolved = not (self._auto_device or self._auto_night_device)
+
+        self._switching = False
         self.night_device_width: int = self._parse_dim(cam.get("night_device_width", self.width))
         self.night_device_height: int = self._parse_dim(cam.get("night_device_height", self.height))
         self.night_device_fps: int = cam.get("night_device_fps", self.fps)
@@ -103,7 +117,7 @@ class CCTVSystem:
         mot = self.cfg["motion"]
         self.threshold = mot["threshold"]
         self.min_area = mot["min_area"]
-        self.blur_size = max(1, mot["blur_size"] // 2 * 2 + 1)  # must be odd
+        self.blur_size = max(1, mot["blur_size"] // 2 * 2 + 1)
         self.cooldown_seconds = mot["cooldown_seconds"]
         self.recording_tail_seconds = mot.get("recording_tail_seconds", self.cooldown_seconds)
         self.motion_scale = max(0.05, min(1.0, mot.get("scale", 1.0)))
@@ -135,7 +149,6 @@ class CCTVSystem:
         self.emergency_free_space_gb = sto.get("emergency_free_space_gb", 1.0)
         self.emergency_delete_count = sto.get("emergency_delete_count", 4)
 
-        # Notifications
         notif = self.cfg.get("notifications", {})
         self.notifications_enabled = notif.get("enabled", False)
         self.smtp_cfg = notif.get("smtp", {})
@@ -145,7 +158,6 @@ class CCTVSystem:
         self.min_alert_interval = notif.get("min_interval_minutes", 5) * 60
         self._last_alert_time: float = 0.0
 
-        # Telegram
         tel = self.cfg.get("telegram", {})
         self.telegram_enabled = tel.get("enabled", False)
         self.telegram_token = tel.get("bot_token", "")
@@ -157,7 +169,6 @@ class CCTVSystem:
         self._telegram_offset: int = 0
         self._telegram_poll_thread: threading.Thread | None = None
 
-        # Cloud Storage (Google Drive & OneDrive)
         cloud_cfg = self.cfg.get("cloud", {})
         gdrive_cfg = cloud_cfg.get("google_drive", {})
         self.gdrive_enabled = gdrive_cfg.get("enabled", False)
@@ -173,7 +184,6 @@ class CCTVSystem:
         self.onedrive_refresh_token = onedrive_cfg.get("refresh_token", "")
         self.onedrive_folder_path = onedrive_cfg.get("folder_path", "CheapSecurity")
 
-        # Encryption (AES-256 ZIP)
         enc_cfg = self.cfg.get("encryption", {})
         self.encryption_passphrase: str = enc_cfg.get("passphrase", "")
         self.encrypt_telegram: bool = enc_cfg.get("telegram", False)
@@ -200,6 +210,7 @@ class CCTVSystem:
         self._manual_record_chat_id: str | None = None
         self._manual_recording_active: bool = False
         self._manual_finalize_done = threading.Event()
+        self._prebuffer_span = 0.0
 
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -209,25 +220,18 @@ class CCTVSystem:
         self._telegram_store_path: Path = self.record_dir / ".telegram_messages.json"
         self._current_frame: bytes | None = None
         self._jpeg_quality = 75
-        self._buffer_jpeg_quality = 85  # lower memory use for pre-motion buffer
+        self._buffer_jpeg_quality = 85
 
-        # Measured capture loop FPS (may be lower than camera-reported FPS
-        # on slow hardware). Used for video writer so playback duration
-        # matches wall-clock recording duration.
         self.measured_fps: float = float(self.fps) if self.fps > 0 else 15.0
         self._frame_times: deque = deque()
+
+        self._learned_record_fps: dict[tuple[str, int | str], float] = {}
 
         pre_size = int(self.measured_fps * self.pre_buffer_seconds)
         self._pre_buffer: deque = deque(maxlen=max(pre_size, 1))
         self._prev_gray: np.ndarray | None = None
 
     def _load_env_secrets(self) -> None:
-        """Override sensitive config values with environment variables.
-
-        Environment-supplied secrets take precedence over config.json and are
-        never written back to disk. Leave the config file entries empty or set
-        them to dummy values when using this feature.
-        """
         self.telegram_token = os.environ.get(
             "CHEAPSECURITY_TELEGRAM_BOT_TOKEN", self.telegram_token
         )
@@ -266,13 +270,8 @@ class CCTVSystem:
 
         web_auth_password = os.environ.get("CHEAPSECURITY_WEB_AUTH_PASSWORD")
         if web_auth_password:
-            self.cfg.setdefault("web", {}).setdefault("auth", {})[
-                "password"
-            ] = web_auth_password
+            self.cfg.setdefault("web", {}).setdefault("auth", {})["password"] = web_auth_password
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
     def start(self) -> None:
         logger.info("Starting CCTV engine...")
         self.running = True
@@ -312,7 +311,6 @@ class CCTVSystem:
             self._apply_camera_night_mode()
 
     def set_night_mode_strength(self, strength: str) -> None:
-        """Set the night-mode enhancement strength (low, normal, aggressive)."""
         strength = (strength or "normal").lower().strip()
         if strength not in _NIGHT_MODE_PROFILES:
             strength = "normal"
@@ -376,8 +374,15 @@ class CCTVSystem:
 
     @property
     def night_device_active(self) -> bool:
-        """True when the optional IR/night camera is currently in use."""
         return self.night_device is not None and self._active_device == self.night_device
+
+    def _active_camera_description(self) -> str:
+        dev = self._active_device
+        path = dev if isinstance(dev, str) else f"/dev/video{dev}"
+        if self.night_device is None:
+            return f"{path} (no IR camera detected — software night mode only)"
+        label = "night/IR" if self.night_device_active else "day"
+        return f"{label} camera ({path})"
 
     def _save_config(self) -> None:
         with self._config_lock:
@@ -393,7 +398,6 @@ class CCTVSystem:
                     temp_path.unlink()
 
     def _recording_files(self) -> list:
-        """Return existing recording files, excluding temp/fix files."""
         files = []
         for path in self.record_dir.iterdir():
             try:
@@ -408,7 +412,6 @@ class CCTVSystem:
         return files
 
     def list_recordings(self) -> list:
-        """Return metadata for all recorded videos, newest first."""
         videos = []
         for path in sorted(self._recording_files(), reverse=True):
             try:
@@ -427,13 +430,9 @@ class CCTVSystem:
             )
         return videos
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
     def _run(self) -> None:
         if not self._open_capture():
-            logger.error("Could not open camera. Engine halted.")
-            return
+            logger.error("Could not open camera at startup; will keep retrying in the background.")
 
         last_cleanup = time.time()
         if self.delete_old_on_startup:
@@ -443,9 +442,11 @@ class CCTVSystem:
         while self.running:
             loop_start = time.time()
 
-            # Reconnect if the camera was released (e.g. by too many frame failures)
             if self.cap is None:
-                # Give the kernel time to re-enumerate the USB camera before retrying.
+                if self._switching:
+                    time.sleep(0.2)
+                    continue
+
                 time.sleep(self._reconnect_backoff)
                 with self._cap_lock:
                     if self.cap is not None:
@@ -458,6 +459,8 @@ class CCTVSystem:
                         f"Camera reconnect failed; retrying in {self._reconnect_backoff:.1f}s..."
                     )
                     self._reconnect_backoff = min(self._reconnect_backoff * 2, 30.0)
+
+                    self._auto_resolved = not (self._auto_device or self._auto_night_device)
                 continue
 
             with self._cap_lock:
@@ -477,26 +480,16 @@ class CCTVSystem:
                 continue
             self._consecutive_frame_failures = 0
 
-            # Some IR cameras return a grayscale frame; normalize to BGR so
-            # the rest of the pipeline (motion detection, recording, stream)
-            # always works with 3 channels.
             if frame.ndim == 2:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-            # Enhance low-light visibility when night mode is on
             frame = self._apply_night_mode(frame)
 
-            # Update live JPEG frame for web stream
             self._update_live_frame(frame)
 
-            # Motion detection
             motion = self._detect_motion(frame)
             now = time.time()
 
-            # Update measured FPS from a short sliding window so the video
-            # writer uses the real capture rate. This prevents clips from
-            # playing back too fast when the loop runs slower than the
-            # camera-reported FPS.
             self._frame_times.append(now)
             while self._frame_times and (now - self._frame_times[0]) > 2.0:
                 self._frame_times.popleft()
@@ -506,24 +499,18 @@ class CCTVSystem:
             else:
                 self.measured_fps = float(self.fps) if self.fps > 0 else 15.0
 
-            # Manual recording request from Telegram
             with self._state_lock:
                 manual_active = now < self._manual_record_until
                 self._manual_recording_active = manual_active
 
-            # Update motion state with cooldown
             if motion:
                 self.last_motion_time = now
                 self.motion_active = True
             elif self.motion_active and (now - self.last_motion_time) <= self.cooldown_seconds:
-                # Still inside motion cooldown
                 pass
             else:
                 self.motion_active = False
 
-            # Keep recording for recording_tail_seconds after the last motion
-            # frame. This joins separate motion bursts (e.g. door opening,
-            # then a person walking in) into a single continuous clip.
             recently_saw_motion = (now - self.last_motion_time) <= self.recording_tail_seconds
             should_record = recently_saw_motion or manual_active
 
@@ -534,7 +521,6 @@ class CCTVSystem:
             elif not should_record and self.is_recording:
                 self._stop_recording()
 
-            # Enforce max clip duration
             if self.is_recording and (now - self.recording_started) >= self.max_duration:
                 logger.info("Max clip duration reached, closing segment.")
                 self._stop_recording()
@@ -546,14 +532,10 @@ class CCTVSystem:
             else:
                 self._pre_buffer.append(self._encode_buffer_frame(frame))
 
-            # Periodic storage cleanup
             if (now - last_cleanup) > (self.cleanup_interval * 60):
                 self._cleanup_storage()
                 last_cleanup = now
 
-            # Throttle loop to configured FPS. Real V4L2 capture blocks until
-            # a frame is ready, but this also limits CPU use when capture is
-            # fast and keeps the frame rate stable for recordings.
             elapsed = time.time() - loop_start
             sleep_time = target_frame_interval - elapsed
             if sleep_time > 0:
@@ -562,12 +544,8 @@ class CCTVSystem:
         self._stop_recording()
         self._release_capture()
 
-    # ------------------------------------------------------------------
-    # Camera
-    # ------------------------------------------------------------------
     @staticmethod
     def _parse_dim(val: int | str | None) -> int:
-        """Parse dimension settings (width/height). Return 0 for auto/max."""
         if val is None or val == 0:
             return 0
         if isinstance(val, str):
@@ -580,6 +558,144 @@ class CCTVSystem:
             return max(0, val)
         return 0
 
+    @staticmethod
+    def _enumerate_video_devices() -> list[int]:
+        devices: list[int] = []
+        for path in Path("/dev").glob("video[0-9]*"):
+            with contextlib.suppress(ValueError):
+                devices.append(int(path.name[len("video") :]))
+        return sorted(set(devices))
+
+    @staticmethod
+    def _v4l2_device_caps(index: int) -> tuple[str, bool] | None:
+        import fcntl
+        import struct
+
+        VIDIOC_QUERYCAP = 0x80685600  # noqa: N806  # _IOR('V', 0, struct v4l2_capability)
+        try:
+            with open(f"/dev/video{index}", "rb", buffering=0) as fd:
+                buf = bytearray(104)
+                fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf, True)
+        except OSError:
+            return None
+        card = bytes(buf[16:48]).split(b"\0", 1)[0].decode("utf-8", "ignore").strip()
+        device_caps = struct.unpack_from("I", buf, 88)[0]
+        return card, bool(device_caps & 0x00000001)
+
+    @staticmethod
+    def _analyze_frame(frame: np.ndarray) -> tuple[float, str]:
+        if frame.ndim == 2:
+            return 0.0, "mono"
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        saturation = hsv[..., 1]
+        if int(saturation.max()) == 0:
+            return 0.0, "mono"
+        score = float(np.percentile(saturation, 95))
+        vivid = saturation >= _AUTO_VIVID_SATURATION
+        if float(vivid.mean()) >= _AUTO_TINT_MIN_VIVID_FRACTION:
+            bins = int(180 // _AUTO_HUE_BIN_WIDTH)
+            hues = (hsv[..., 0][vivid] // _AUTO_HUE_BIN_WIDTH).astype(np.intp)
+            hist = np.bincount(hues, minlength=bins)
+            spread = int((hist >= _AUTO_TINT_MIN_VIVID_FRACTION * hues.size).sum())
+            if spread <= _AUTO_TINT_MAX_HUE_BINS:
+                return score, "tinted"
+        return score, "color"
+
+    def _probe_device(self, device: int) -> tuple[float, str] | None:
+        cap: cv2.VideoCapture | None = None
+        try:
+            cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                return None
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, _AUTO_PROBE_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _AUTO_PROBE_HEIGHT)
+
+            time.sleep(_AUTO_PROBE_SETTLE_S)
+            frame: np.ndarray | None = None
+            failures = 0
+            for _ in range(_AUTO_PROBE_FRAMES):
+                ok, candidate = cap.read()
+                if not ok or candidate is None:
+                    failures += 1
+                    if failures >= _AUTO_PROBE_MAX_FAILURES:
+                        return None
+                    time.sleep(0.05)
+                    continue
+                failures = 0
+                frame = candidate
+            if frame is None:
+                return None
+            return self._analyze_frame(frame)
+        except Exception:
+            return None
+        finally:
+            if cap is not None:
+                cap.release()
+
+            time.sleep(0.1)
+
+    def _resolve_auto_devices(self) -> bool:
+        scores: dict[int, float] = {}
+        kinds: dict[int, str] = {}
+        seen_names: set[str] = set()
+
+        for index in self._enumerate_video_devices():
+            caps = self._v4l2_device_caps(index)
+            name = "unknown"
+            if caps is not None:
+                name, is_capture = caps
+                if not is_capture:
+                    logger.info(
+                        f"AUTO camera: skipping /dev/video{index} ({name}): not a capture device"
+                    )
+                    continue
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+
+            probe = self._probe_device(index)
+            if probe is None:
+                logger.warning(
+                    f"AUTO camera: /dev/video{index} ({name}) did not deliver frames; skipping"
+                )
+                continue
+            score, kind = probe
+            scores[index] = score
+            kinds[index] = kind
+            logger.info(f"AUTO camera: /dev/video{index} ({name}) score {score:.1f} [{kind}]")
+
+        if not scores:
+            logger.warning("AUTO camera: no working camera found.")
+            return False
+
+        if self._auto_device:
+            preference = {"color": 2, "tinted": 1, "mono": 0}
+            self.device = max(scores, key=lambda d: (preference[kinds[d]], scores[d]))
+            logger.info(f"AUTO camera: day camera → /dev/video{self.device}")
+
+        if self._auto_night_device:
+            day_index = self.device if isinstance(self.device, int) else None
+            mono = [d for d, k in kinds.items() if k == "mono" and d != day_index]
+            tinted = [d for d, k in kinds.items() if k == "tinted" and d != day_index]
+            if mono:
+                night: int | None = min(mono, key=lambda d: scores[d])
+            elif tinted:
+                night = tinted[0]
+            else:
+                night = None
+            if night is not None:
+                self.night_device = night
+                logger.info(f"AUTO camera: night camera → /dev/video{night} [{kinds[night]}]")
+            else:
+                self.night_device = None
+                logger.info(
+                    "AUTO camera: no night/IR camera found; "
+                    "night mode will use software enhancement"
+                )
+
+        return True
+
     def _open_device(
         self,
         device: int | str,
@@ -589,27 +705,17 @@ class CCTVSystem:
         *,
         save_defaults: bool = False,
     ) -> cv2.VideoCapture | None:
-        """Open a single V4L2 device with the requested resolution and FPS.
-
-        Returns the capture object on success, or None if the device could not
-        be opened. The caller is responsible for assigning the result to
-        ``self.cap`` under ``self._cap_lock``.
-        """
         logger.info(f"Opening camera /dev/video{device}")
         cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not cap.isOpened():
-            # Fallback to default backend
             cap = cv2.VideoCapture(device)
         if not cap.isOpened():
             logger.error(f"Failed to open camera device {device}")
             return None
 
-        # If width or height is <= 0 (auto/max), request oversized dimensions so
-        # V4L2 automatically clamps to the maximum supported hardware resolution.
         req_w = 10000 if width <= 0 else width
         req_h = 10000 if height <= 0 else height
 
-        # Request MJPG pixel format so high resolutions (e.g. 2K/4K) are available
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
@@ -618,21 +724,22 @@ class CCTVSystem:
         actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        fmt_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fmt_str = "".join(chr((fmt_int >> (8 * i)) & 0xFF) for i in range(4))
         if actual_fps > 0:
             self.actual_fps = actual_fps
         else:
             self.actual_fps = fps
         if width <= 0 or height <= 0:
             logger.info(
-                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+                f"Auto-detected max camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps [{fmt_str}]"
             )
         else:
             logger.info(
-                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps"
+                f"Camera resolution: {actual_width}x{actual_height} @ {self.actual_fps:.1f} fps [{fmt_str}]"
             )
 
         if save_defaults:
-            # Capture current camera defaults before any night-mode changes
             self._normal_brightness = cap.get(cv2.CAP_PROP_BRIGHTNESS)
             self._normal_contrast = cap.get(cv2.CAP_PROP_CONTRAST)
             logger.info(
@@ -643,7 +750,11 @@ class CCTVSystem:
         return cap
 
     def _open_capture(self) -> bool:
-        """Open the camera matching current mode, falling back to alternate if needed."""
+        if not self._auto_resolved:
+            self._auto_resolved = self._resolve_auto_devices()
+            if not self._auto_resolved:
+                logger.warning("AUTO camera detection found no usable camera yet; will retry.")
+                return False
         if self.night_mode and self.night_device is not None:
             primary_device = self.night_device
             primary_w, primary_h, primary_fps = (
@@ -695,11 +806,6 @@ class CCTVSystem:
         return True
 
     def _switch_camera(self) -> bool:
-        """Release the current camera and open the one for the current mode.
-
-        If the requested camera fails to open, fall back to the alternate
-        camera so the system keeps running.
-        """
         if self.is_recording:
             logger.info("Stopping recording before camera switch.")
             self._stop_recording()
@@ -731,31 +837,37 @@ class CCTVSystem:
             fallback_defaults = False
             fallback_label = "night"
 
-        self._release_capture()
-        cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
-
-        if cap is None and fallback_device is not None:
-            logger.warning(
-                f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
-            )
-            target_device = fallback_device
-            width = fallback_w
-            height = fallback_h
-            fps = fallback_fps
-            save_defaults = fallback_defaults
-            label = fallback_label
+        self._switching = True
+        try:
+            self._release_capture()
             cap = self._open_device(target_device, width, height, fps, save_defaults=save_defaults)
 
-        if cap is None:
-            logger.error("Camera switch failed; waiting for reconnect loop.")
-            return False
+            if cap is None and fallback_device is not None:
+                logger.warning(
+                    f"{label.capitalize()} camera failed to open; falling back to {fallback_label} camera."
+                )
+                target_device = fallback_device
+                width = fallback_w
+                height = fallback_h
+                fps = fallback_fps
+                save_defaults = fallback_defaults
+                label = fallback_label
+                cap = self._open_device(
+                    target_device, width, height, fps, save_defaults=save_defaults
+                )
 
-        with self._cap_lock:
-            self.cap = cap
-            self._active_device = target_device
-        logger.info(f"Switched to {label} camera (/dev/video{target_device}).")
-        self._apply_camera_night_mode()
-        return True
+            if cap is None:
+                logger.error("Camera switch failed; waiting for reconnect loop.")
+                return False
+
+            with self._cap_lock:
+                self.cap = cap
+                self._active_device = target_device
+            logger.info(f"Switched to {label} camera (/dev/video{target_device}).")
+            self._apply_camera_night_mode()
+            return True
+        finally:
+            self._switching = False
 
     def _release_capture(self) -> None:
         with self._cap_lock:
@@ -765,12 +877,6 @@ class CCTVSystem:
             self._prev_gray = None
 
     def _apply_camera_night_mode(self) -> None:
-        """Try to tune V4L2 camera properties for low light.
-
-        Skip the gain/brightness tweaks when the active device is the optional
-        IR/night camera, because those controls are usually not meaningful on
-        IR modules.
-        """
         with self._cap_lock:
             if not self.cap or not self.cap.isOpened():
                 return
@@ -805,11 +911,8 @@ class CCTVSystem:
                 f"Gain: {actual_gain}, Brightness: {actual_brightness}, Contrast: {actual_contrast}"
             )
 
-    # ------------------------------------------------------------------
-    # Motion detection
-    # ------------------------------------------------------------------
     def _detect_motion(self, frame: np.ndarray) -> bool:
-        # Downscale for fast motion detection on high-res streams
+
         if self.motion_scale < 1.0:
             small = cv2.resize(frame, (0, 0), fx=self.motion_scale, fy=self.motion_scale)
         else:
@@ -829,13 +932,9 @@ class CCTVSystem:
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         self._prev_gray = gray
 
-        # Scale contour area back to full-resolution pixels
         area_factor = 1.0 / (self.motion_scale**2)
         return any(cv2.contourArea(cnt) * area_factor >= self.min_area for cnt in contours)
 
-    # ------------------------------------------------------------------
-    # Recording
-    # ------------------------------------------------------------------
     def _start_recording(self, frame: np.ndarray) -> None:
         self._ensure_disk_space()
 
@@ -855,27 +954,38 @@ class CCTVSystem:
         self.recording_started = time.time()
         logger.info(f"Recording started: {self.recording_path.name}")
 
-        # Dump pre-buffer for motion-triggered recordings only
         with self._state_lock:
             manual_chat_id = self._manual_record_chat_id
+        self._prebuffer_span = 0.0
         if not manual_chat_id:
+            self._prebuffer_span = len(self._pre_buffer) / max(self.measured_fps, 1.0)
             for encoded in self._pre_buffer:
                 decoded = cv2.imdecode(np.frombuffer(encoded, np.uint8), cv2.IMREAD_COLOR)
                 if decoded is not None:
                     self._write_frame(decoded)
         self._pre_buffer.clear()
 
+    @staticmethod
+    def _device_key(device: int | str) -> tuple[str, int | str]:
+        return ("path", device) if isinstance(device, str) else ("idx", device)
+
     def _create_writer(self, path: str, width: int, height: int) -> Optional["cv2.VideoWriter"]:
-        # Use measured loop FPS so playback duration matches wall-clock time.
-        writer_fps = max(1.0, min(60.0, self.measured_fps))
+
+        learned = self._learned_record_fps.get(self._device_key(self._active_device))
+        if learned:
+            writer_fps = learned
+            source = "learned"
+        else:
+            writer_fps = self.measured_fps
+            source = "measured"
+        writer_fps = max(0.1, min(60.0, writer_fps))
         self._writer_fps = writer_fps
         fourcc = cv2.VideoWriter.fourcc(*self.codec_fourcc)
         writer = cv2.VideoWriter(path, fourcc, writer_fps, (width, height))
         if writer.isOpened():
-            logger.info(f"Video writer created at {writer_fps:.2f} fps")
+            logger.info(f"Video writer created at {writer_fps:.2f} fps ({source})")
             return writer
 
-        # Fallbacks for embedded/ARM boards where codec support varies
         for codec, ext in [("MJPG", ".avi"), ("XVID", ".avi")]:
             logger.warning(f"Codec {self.codec_fourcc} failed, trying {codec}")
             fallback_path = path
@@ -885,7 +995,7 @@ class CCTVSystem:
             writer = cv2.VideoWriter(fallback_path, fourcc, writer_fps, (width, height))
             if writer.isOpened():
                 self.recording_path = Path(fallback_path)
-                logger.info(f"Video writer created at {writer_fps:.2f} fps ({codec})")
+                logger.info(f"Video writer created at {writer_fps:.2f} fps ({codec}, {source})")
                 return writer
 
         return None
@@ -902,33 +1012,119 @@ class CCTVSystem:
         if self.recording_path:
             actual_duration = time.time() - self.recording_started
 
-            # If this was a manual Telegram recording, send it to the requester
             with self._state_lock:
                 manual_chat_id = self._manual_record_chat_id
                 self._manual_record_chat_id = None
 
             if manual_chat_id:
-                # Finalize manual recordings in the background so the capture
-                # loop is not blocked by ffmpeg + Telegram upload.
                 frames_written = self._frames_written
                 writer_fps = self._writer_fps
                 path = self.recording_path
+                device = self._active_device
                 self._manual_finalize_done.clear()
                 threading.Thread(
                     target=self._finalize_manual_recording,
-                    args=(path, manual_chat_id, actual_duration, frames_written, writer_fps),
+                    args=(
+                        path,
+                        manual_chat_id,
+                        actual_duration,
+                        frames_written,
+                        writer_fps,
+                        device,
+                    ),
                     daemon=True,
                 ).start()
             else:
-                size = self.recording_path.stat().st_size
-                logger.info(
-                    f"Recording saved: {self.recording_path.name} ({self._human_size(size)})"
-                )
-                self._maybe_send_telegram(self.recording_path)
-                self._maybe_upload_cloud(self.recording_path)
+                duration = actual_duration + self._prebuffer_span
+                frames_written = self._frames_written
+                writer_fps = self._writer_fps
+                path = self.recording_path
+                device = self._active_device
+                threading.Thread(
+                    target=self._finalize_motion_recording,
+                    args=(path, duration, frames_written, writer_fps, device),
+                    daemon=True,
+                ).start()
 
             self.recording_path = None
         self.is_recording = False
+
+    @staticmethod
+    def _patch_avi_fps(path: Path, fps: float) -> bool:
+        frac = Fraction(fps).limit_denominator(1_000_000)
+        usec_per_frame = int(round(1_000_000 / fps))
+        try:
+            with open(path, "r+b") as f:
+                size = path.stat().st_size
+
+                def read_chunk_header(pos: int) -> tuple[bytes, int] | None:
+                    if pos + 8 > size:
+                        return None
+                    f.seek(pos)
+                    header = f.read(8)
+                    if len(header) < 8:
+                        return None
+                    return header[:4], int.from_bytes(header[4:8], "little")
+
+                def patch_strh(strl_pos: int, strl_size: int) -> bool:
+                    pos = strl_pos + 12
+                    end = strl_pos + 8 + strl_size
+                    while pos + 8 <= end:
+                        header = read_chunk_header(pos)
+                        if header is None:
+                            return False
+                        fourcc, csize = header
+                        if fourcc == b"strh":
+                            f.seek(pos + 8 + 20)
+                            f.write(frac.denominator.to_bytes(4, "little"))
+                            f.write(frac.numerator.to_bytes(4, "little"))
+                            return True
+                        pos += 8 + csize + (csize & 1)
+                    return False
+
+                def walk_hdrl(hdrl_pos: int, hdrl_size: int) -> tuple[bool, bool]:
+                    patched_avih = False
+                    patched_strh = False
+                    pos = hdrl_pos + 12
+                    end = hdrl_pos + 8 + hdrl_size
+                    while pos + 8 <= end:
+                        header = read_chunk_header(pos)
+                        if header is None:
+                            break
+                        fourcc, csize = header
+                        if fourcc == b"avih":
+                            f.seek(pos + 8)
+                            f.write(usec_per_frame.to_bytes(4, "little"))
+                            patched_avih = True
+                        elif fourcc == b"LIST" and not patched_strh:
+                            f.seek(pos + 8)
+                            if f.read(4) == b"strl":
+                                patched_strh = patch_strh(pos, csize)
+                        pos += 8 + csize + (csize & 1)
+                    return patched_avih, patched_strh
+
+                patched_avih = False
+                patched_strh = False
+                pos = 12
+                while pos + 8 <= size:
+                    header = read_chunk_header(pos)
+                    if header is None:
+                        break
+                    fourcc, csize = header
+                    if fourcc == b"avih":
+                        f.seek(pos + 8)
+                        f.write(usec_per_frame.to_bytes(4, "little"))
+                        patched_avih = True
+                    elif fourcc == b"LIST":
+                        f.seek(pos + 8)
+                        if f.read(4) == b"hdrl":
+                            a, s = walk_hdrl(pos, csize)
+                            patched_avih = patched_avih or a
+                            patched_strh = patched_strh or s
+                    pos += 8 + csize + (csize & 1)
+                return patched_avih and patched_strh
+        except OSError:
+            return False
 
     def _fix_video_duration(
         self,
@@ -936,27 +1132,36 @@ class CCTVSystem:
         actual_duration: float,
         frames_written: int | None = None,
         writer_fps: float | None = None,
+        device: int | str | None = None,
     ) -> None:
-        """Adjust container frame rate so playback length matches wall-clock time.
-
-        OpenCV's VideoWriter uses the loop's estimated FPS when the file is
-        created. If the capture rate drops during recording (e.g., slow disk
-        I/O), the saved file can play back too fast. Rewriting the container
-        header with the actual FPS (frame_count / actual_duration) fixes this.
-        """
         frames_written = frames_written if frames_written is not None else self._frames_written
         writer_fps = writer_fps if writer_fps is not None else self._writer_fps
         if actual_duration <= 0 or frames_written <= 0 or writer_fps <= 0:
             return
 
+        correct_fps = frames_written / actual_duration
+        correct_fps = max(0.1, min(60.0, correct_fps))
+        if device is not None and actual_duration >= 1.0:
+            self._learned_record_fps[self._device_key(device)] = correct_fps
+
         playback_duration = frames_written / writer_fps
         drift = abs(playback_duration - actual_duration)
-        # Only fix if the drift is meaningful (more than half a second or 10%)
+
         if drift < 0.5 and drift / max(actual_duration, 1.0) < 0.1:
+            logger.info(
+                f"Video duration OK: {actual_duration:.2f}s, drift {drift:.2f}s "
+                f"(stamped {writer_fps:.2f} fps, no fix needed)"
+            )
             return
 
-        correct_fps = frames_written / actual_duration
-        correct_fps = max(1.0, min(60.0, correct_fps))
+        if path.suffix.lower() == ".avi":
+            if self._patch_avi_fps(path, correct_fps):
+                logger.info(
+                    f"Fixed video FPS from {writer_fps:.2f} to {correct_fps:.2f} "
+                    f"({frames_written} frames / {actual_duration:.2f}s, AVI header)"
+                )
+                return
+            logger.warning("AVI header patch failed; falling back to ffmpeg re-encode.")
 
         if not shutil.which("ffmpeg"):
             logger.warning(
@@ -967,10 +1172,6 @@ class CCTVSystem:
 
         fixed_path = path.with_suffix(".fixed" + path.suffix)
         try:
-            # Re-encode with a filter that forces evenly spaced timestamps at the
-            # calculated frame rate. A plain ``-r`` with ``-c:v copy`` can drop
-            # or duplicate frames depending on the input/output rate ratio, so
-            # we rewrite timestamps while keeping the same MJPEG codec.
             subprocess.run(
                 [
                     "ffmpeg",
@@ -1012,33 +1213,44 @@ class CCTVSystem:
         actual_duration: float,
         frames_written: int,
         writer_fps: float,
+        device: int | str,
     ) -> None:
-        """Fix duration and upload a manual recording without blocking the main loop."""
         try:
-            self._fix_video_duration(path, actual_duration, frames_written, writer_fps)
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
             size = path.stat().st_size
             logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+            caption = self._recording_caption(
+                "🎥 Manual video", path, actual_duration, frames_written, writer_fps
+            )
             try:
-                self._send_telegram_video(path, chat_id=chat_id)
+                self._send_telegram_video(path, chat_id=chat_id, caption=caption)
                 self._maybe_upload_cloud(path)
             except Exception as e:
                 logger.error(f"Failed to send manual Telegram video: {self._redact_token(str(e))}")
         finally:
             self._manual_finalize_done.set()
 
-    # ------------------------------------------------------------------
-    # Streaming
-    # ------------------------------------------------------------------
+    def _finalize_motion_recording(
+        self,
+        path: Path,
+        actual_duration: float,
+        frames_written: int,
+        writer_fps: float,
+        device: int | str,
+    ) -> None:
+        try:
+            self._fix_video_duration(path, actual_duration, frames_written, writer_fps, device)
+            size = path.stat().st_size
+            logger.info(f"Recording saved: {path.name} ({self._human_size(size)})")
+            caption = self._recording_caption(
+                "🎥 Motion", path, actual_duration, frames_written, writer_fps
+            )
+            self._maybe_send_telegram(path, caption=caption)
+            self._maybe_upload_cloud(path)
+        except Exception as e:
+            logger.error(f"Failed to finalize motion recording {path.name}: {e}")
+
     def _apply_night_mode(self, frame: np.ndarray) -> np.ndarray:
-        """Enhance low-light visibility using gamma correction + CLAHE.
-
-        The strength is selected from ``_NIGHT_MODE_PROFILES`` so users can
-        choose between a gentle lift (low), balanced enhancement (normal),
-        or the previous aggressive CLAHE behavior.
-
-        When a dedicated IR/night camera is active and software enhancement is
-        disabled, the frame is returned unchanged.
-        """
         if not self.night_mode:
             return frame
         if self._active_device == self.night_device and not self.night_software_enhance:
@@ -1080,9 +1292,6 @@ class CCTVSystem:
         with self._lock:
             self._current_frame = buf.tobytes()
 
-    # ------------------------------------------------------------------
-    # Alerts
-    # ------------------------------------------------------------------
     def _maybe_send_alert(self, frame: np.ndarray) -> None:
         if not self.notifications_enabled:
             return
@@ -1094,7 +1303,6 @@ class CCTVSystem:
             return
         self._last_alert_time = now
 
-        # Send in background so motion capture is not blocked
         threading.Thread(
             target=self._send_alert_email,
             args=(frame.copy(),),
@@ -1146,10 +1354,7 @@ class CCTVSystem:
         except Exception as e:
             logger.error(f"Failed to send alert email: {e}")
 
-    # ------------------------------------------------------------------
-    # Telegram
-    # ------------------------------------------------------------------
-    def _maybe_send_telegram(self, video_path: Path) -> None:
+    def _maybe_send_telegram(self, video_path: Path, caption: str | None = None) -> None:
         if not self.telegram_enabled:
             return
         if not self.telegram_token or not self.telegram_chat_id:
@@ -1167,6 +1372,7 @@ class CCTVSystem:
         threading.Thread(
             target=self._send_telegram_video,
             args=(video_path,),
+            kwargs={"caption": caption},
             daemon=True,
         ).start()
 
@@ -1176,10 +1382,6 @@ class CCTVSystem:
         return text.replace(self.telegram_token, "<TOKEN>")
 
     def _create_aes_zip(self, source_path: Path, archive_name: str | None = None) -> Path:
-        """Compress source_path into an AES-256 encrypted .zip file.
-
-        Returns the path to the newly created .zip archive.
-        """
         zip_name = (archive_name or source_path.stem) + ".zip"
         zip_path = source_path.parent / zip_name
         passphrase = (self.encryption_passphrase or "").encode("utf-8")
@@ -1196,7 +1398,6 @@ class CCTVSystem:
         return zip_path
 
     def _send_telegram_document(self, doc_path: Path, chat_id: str, caption: str = "") -> None:
-        """Send a document (.zip file) to a Telegram chat."""
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendDocument"
         max_retries = 3
         backoff = 1.0
@@ -1244,7 +1445,19 @@ class CCTVSystem:
                 return
         logger.error(f"Failed to send Telegram document after {max_retries} attempts")
 
-    def _send_telegram_video(self, video_path: Path, chat_id: str | None = None) -> None:
+    @staticmethod
+    def _recording_caption(
+        label: str, path: Path, actual_duration: float, frames_written: int, writer_fps: float
+    ) -> str:
+        real_fps = frames_written / actual_duration if actual_duration > 0 else 0.0
+        return (
+            f"{label}: {actual_duration:.1f}s — {frames_written} frames "
+            f"@ {real_fps:.1f} fps (stamped {writer_fps:.1f})\nFile: {path.name}"
+        )
+
+    def _send_telegram_video(
+        self, video_path: Path, chat_id: str | None = None, caption: str | None = None
+    ) -> None:
         target_chat = chat_id or self.telegram_chat_id
         if not target_chat:
             return
@@ -1263,7 +1476,8 @@ class CCTVSystem:
 
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendVideo"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
+        if caption is None:
+            caption = f"🎥 Motion detected at {timestamp}\nFile: {video_path.name}"
 
         max_retries = 3
         backoff = 1.0
@@ -1373,7 +1587,6 @@ class CCTVSystem:
         logger.error(f"Failed to send Telegram snapshot after {max_retries} attempts")
 
     def _send_telegram_message(self, text: str, chat_id: str) -> int | None:
-        """Send a text message. Return the message_id on success, None otherwise."""
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
         data = {"chat_id": chat_id, "text": text}
 
@@ -1425,7 +1638,6 @@ class CCTVSystem:
         caption: str = "",
         max_entries: int = 100,
     ) -> None:
-        """Persist a sent Telegram message ID so it can be deleted later."""
         try:
             entry = {
                 "message_id": message_id,
@@ -1437,7 +1649,7 @@ class CCTVSystem:
             with self._telegram_store_lock:
                 messages = self._load_telegram_messages()
                 messages.append(entry)
-                # Keep only the most recent entries to avoid unbounded growth.
+
                 if len(messages) > max_entries:
                     messages = messages[-max_entries:]
                 temp_path = self._telegram_store_path.with_suffix(".tmp")
@@ -1448,7 +1660,6 @@ class CCTVSystem:
             logger.error(f"Failed to store Telegram message ID: {self._redact_token(str(e))}")
 
     def _load_telegram_messages(self) -> list[dict]:
-        """Load persisted Telegram message IDs."""
         if not self._telegram_store_path.exists():
             return []
         try:
@@ -1461,7 +1672,6 @@ class CCTVSystem:
         return []
 
     def _delete_telegram_message(self, message_id: int, chat_id: str) -> bool:
-        """Delete a message from Telegram and the local store. Return True on success."""
         url = f"https://api.telegram.org/bot{self.telegram_token}/deleteMessage"
         data = {"chat_id": chat_id, "message_id": message_id}
 
@@ -1508,8 +1718,6 @@ class CCTVSystem:
     def _telegram_poll_loop(self) -> None:
         logger.info("Starting Telegram command polling...")
         while self.running and self.telegram_poll_commands:
-            # Command polling works even when automatic Telegram uploads are disabled,
-            # so the user can still use /snapshot, /video, and toggle settings.
             try:
                 url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
                 params = {"offset": self._telegram_offset + 1, "limit": 10}
@@ -1536,7 +1744,6 @@ class CCTVSystem:
                     self._telegram_offset = max(self._telegram_offset, update["update_id"])
                     self._handle_telegram_update(update)
             except requests.exceptions.Timeout:
-                # Long-polling timeouts are normal on a quiet chat.
                 logger.debug("Telegram getUpdates timed out, retrying...")
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"Telegram poll connection error: {self._redact_token(str(e))}")
@@ -1553,7 +1760,6 @@ class CCTVSystem:
         if not text or not chat_id:
             return
 
-        # Only respond to the configured chat
         if chat_id != str(self.telegram_chat_id):
             self._send_telegram_message("You are not authorized to use this bot.", chat_id)
             return
@@ -1599,40 +1805,52 @@ class CCTVSystem:
         elif cmd[0] == "/night_mode_on":
             self.set_night_mode(True)
             self._send_telegram_message(
-                f"Night mode enabled (strength: {self.night_mode_strength}).", chat_id
+                f"Night mode enabled (strength: {self.night_mode_strength}).\n"
+                f"Using: {self._active_camera_description()}",
+                chat_id,
             )
         elif cmd[0] == "/night_mode_off":
             self.set_night_mode(False)
-            self._send_telegram_message("Night mode disabled.", chat_id)
+            self._send_telegram_message(
+                f"Night mode disabled.\nUsing: {self._active_camera_description()}",
+                chat_id,
+            )
         elif cmd[0] == "/night_mode":
             if len(cmd) > 1 and cmd[1] in _NIGHT_MODE_PROFILES:
                 self.set_night_mode_strength(cmd[1])
                 if not self.night_mode:
                     self.set_night_mode(True)
                 self._send_telegram_message(
-                    f"Night mode enabled with {self.night_mode_strength} strength.", chat_id
+                    f"Night mode enabled with {self.night_mode_strength} strength.\n"
+                    f"Using: {self._active_camera_description()}",
+                    chat_id,
                 )
             else:
                 self._send_telegram_message(
-                    "Usage: /night_mode low | normal | aggressive\n"
-                    "Use /night_mode_off to disable.",
+                    "Usage: /night_mode low | normal | aggressive\nUse /night_mode_off to disable.",
                     chat_id,
                 )
         elif cmd[0] == "/encrypt_telegram_on":
             self.set_encrypt_telegram(True)
-            self._send_telegram_message("Telegram upload encryption enabled (AES-256 ZIP).", chat_id)
+            self._send_telegram_message(
+                "Telegram upload encryption enabled (AES-256 ZIP).", chat_id
+            )
         elif cmd[0] == "/encrypt_telegram_off":
             self.set_encrypt_telegram(False)
             self._send_telegram_message("Telegram upload encryption disabled.", chat_id)
         elif cmd[0] == "/encrypt_gdrive_on":
             self.set_encrypt_gdrive(True)
-            self._send_telegram_message("Google Drive upload encryption enabled (AES-256 ZIP).", chat_id)
+            self._send_telegram_message(
+                "Google Drive upload encryption enabled (AES-256 ZIP).", chat_id
+            )
         elif cmd[0] == "/encrypt_gdrive_off":
             self.set_encrypt_gdrive(False)
             self._send_telegram_message("Google Drive upload encryption disabled.", chat_id)
         elif cmd[0] == "/encrypt_onedrive_on":
             self.set_encrypt_onedrive(True)
-            self._send_telegram_message("OneDrive upload encryption enabled (AES-256 ZIP).", chat_id)
+            self._send_telegram_message(
+                "OneDrive upload encryption enabled (AES-256 ZIP).", chat_id
+            )
         elif cmd[0] == "/encrypt_onedrive_off":
             self.set_encrypt_onedrive(False)
             self._send_telegram_message("OneDrive upload encryption disabled.", chat_id)
@@ -1735,9 +1953,6 @@ class CCTVSystem:
                 self._send_telegram_message("min_id must be <= max_id.", chat_id)
                 return
 
-            # Attempt to delete every message ID in the requested range, not
-            # only the IDs stored locally. Telegram will return an error for
-            # IDs that are too old, already deleted, or not sent by this bot.
             ids_to_delete = list(range(min_id, max_id + 1))
 
             deleted = 0
@@ -1780,7 +1995,6 @@ class CCTVSystem:
             self._send_telegram_message("Failed to take snapshot.", chat_id)
 
     def trigger_manual_recording(self, seconds: int, chat_id: str | None = None) -> None:
-        """Start or extend a manual recording for the given number of seconds."""
         seconds = max(1, min(60, seconds))
         with self._state_lock:
             self._manual_record_until = time.time() + seconds
@@ -1793,7 +2007,6 @@ class CCTVSystem:
             with self._state_lock:
                 manual_active = time.time() < self._manual_record_until
 
-                # Motion recording has priority: do not interrupt or redirect it
                 if self.is_recording and not manual_active:
                     self._send_telegram_message(
                         "A video is already recording due to detected motion. "
@@ -1815,11 +2028,7 @@ class CCTVSystem:
             logger.error(f"Failed to handle video command: {self._redact_token(str(e))}")
             self._send_telegram_message("Failed to start recording.", chat_id)
 
-    # ------------------------------------------------------------------
-    # Cloud Storage Uploads (Google Drive & OneDrive)
-    # ------------------------------------------------------------------
     def _upload_to_gdrive(self, video_path: Path) -> bool:
-        """Upload a video recording to Google Drive via Google Drive REST API v3."""
         if not self.gdrive_refresh_token or not self.gdrive_client_id:
             logger.warning("Google Drive credentials not configured; skipping upload.")
             return False
@@ -1849,8 +2058,6 @@ class CCTVSystem:
                 logger.error("No access_token returned from Google Drive OAuth.")
                 return False
 
-            # Use a resumable upload so the file can be streamed instead of
-            # loading the whole clip into memory on small boards.
             upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
             metadata: dict[str, Any] = {"name": target_file.name}
             if self.gdrive_folder_id:
@@ -1896,7 +2103,6 @@ class CCTVSystem:
                 temp_zip.unlink(missing_ok=True)
 
     def _upload_to_onedrive(self, video_path: Path) -> bool:
-        """Upload a video recording to OneDrive via Microsoft Graph REST API."""
         if not self.onedrive_refresh_token or not self.onedrive_client_id:
             logger.warning("OneDrive credentials not configured; skipping upload.")
             return False
@@ -1954,7 +2160,6 @@ class CCTVSystem:
                 temp_zip.unlink(missing_ok=True)
 
     def _maybe_upload_cloud(self, video_path: Path) -> None:
-        """Trigger background cloud uploads if enabled."""
         if not video_path or not video_path.is_file():
             return
         if self.gdrive_enabled:
@@ -1970,11 +2175,7 @@ class CCTVSystem:
                 daemon=True,
             ).start()
 
-    # ------------------------------------------------------------------
-    # Storage cleanup
-    # ------------------------------------------------------------------
     def _ensure_disk_space(self) -> None:
-        """Delete the oldest N recordings if free disk space is low."""
         free_bytes = shutil.disk_usage(self.record_dir).free
         free_gb = free_bytes / (1024**3)
         if free_gb >= self.emergency_free_space_gb:
@@ -2001,7 +2202,7 @@ class CCTVSystem:
 
         free_bytes_after = shutil.disk_usage(self.record_dir).free
         logger.info(
-            f"Deleted {deleted} recordings. " f"Free space: {free_bytes_after / (1024 ** 3):.2f} GB"
+            f"Deleted {deleted} recordings. Free space: {free_bytes_after / (1024**3):.2f} GB"
         )
 
     def _cleanup_storage(self) -> None:
@@ -2028,7 +2229,6 @@ class CCTVSystem:
 
         max_bytes = self.max_size_gb * (1024**3)
         if total_size > max_bytes:
-            # Delete oldest until under limit
             for path in reversed(files):
                 if not path.exists():
                     continue
