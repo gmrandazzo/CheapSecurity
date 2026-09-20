@@ -53,7 +53,7 @@ parse_remote() {
 }
 
 current_version() {
-    grep -E '^version\s*=\s*"' pyproject.toml | head -n1 | sed -E 's/^version\s*=\s*"([^"]+)".*/\1/'
+    grep -E '^version[[:space:]]*=[[:space:]]*"' pyproject.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
 }
 
 bump_minor() {
@@ -69,8 +69,9 @@ PY
 
 update_version_files() {
     local new="$1"
-    sed -i -E "s/^version\s*=\s*\"[^\"]+\"/version = \"$new\"/" pyproject.toml
-    sed -i -E "s/__version__\s*=\s*\"[^\"]+\"/__version__ = \"$new\"/" src/cheapsecurity/__init__.py
+    sed -i'.bak' -E "s/^version[[:space:]]*=[[:space:]]*\"[^\"]+\"/version = \"$new\"/" pyproject.toml
+    sed -i'.bak' -E "s/__version__[[:space:]]*=[[:space:]]*\"[^\"]+\"/__version__ = \"$new\"/" src/cheapsecurity/__init__.py
+    rm -f pyproject.toml.bak src/cheapsecurity/__init__.py.bak
 
     # Sanity check
     local check
