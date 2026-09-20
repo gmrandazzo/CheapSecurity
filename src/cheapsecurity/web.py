@@ -49,6 +49,7 @@ from flask import (
     session,
 )
 
+from cheapsecurity import __version__
 from cheapsecurity.cctv import CCTVSystem
 
 app = Flask(__name__)
@@ -60,7 +61,7 @@ Swagger(
         "info": {
             "title": "CheapSecurity API",
             "description": "REST API and MJPEG stream for the CheapSecurity CCTV system.",
-            "version": "1.0.0",
+            "version": __version__,
         },
         "securityDefinitions": {
             "basicAuth": {
@@ -164,7 +165,9 @@ def require_csrf() -> Response | None:
 @app.route("/")
 def index() -> str:
     cfg = cctv.cfg if cctv else {}
-    return str(render_template("index.html", cfg=cfg, csrf_token=_get_csrf_token()))
+    return str(
+        render_template("index.html", cfg=cfg, csrf_token=_get_csrf_token(), version=__version__)
+    )
 
 
 @app.route("/api/csrf")
