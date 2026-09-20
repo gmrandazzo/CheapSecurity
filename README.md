@@ -49,6 +49,13 @@ Key Features
 - Optional: a Telegram bot token for Telegram notifications
 - Optional: SMTP credentials for email alerts
 
+## Tested hardware
+
+CheapSecurity is hardware-agnostic and works with any standard V4L2/USB webcam. It has been verified working on:
+
+- **Odroid XU4** — single USB webcam
+- **Raspberry Pi Zero 1 W** — two USB cameras: a **USB color camera** (day) and a **USB IR camera** (night vision), with automatic day/night camera switching via `"device": "auto"` and `"night_device": "auto"`. The Pi's on-board `bcm2835-codec`/`bcm2835-isp` video nodes are detected and skipped automatically.
+
 ## Quick start
 
 1. Verify OpenCV is available:
