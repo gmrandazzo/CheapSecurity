@@ -53,7 +53,7 @@ Key Features
 
 CheapSecurity is hardware-agnostic and works with any standard V4L2/USB webcam. It has been verified working on:
 
-- **Odroid XU4** — single USB webcam
+- **Odroid XU4** — two USB cameras: a **USB color camera** (day) and a **USB IR camera** (night vision)
 - **Raspberry Pi Zero 1 W** — two USB cameras: a **USB color camera** (day) and a **USB IR camera** (night vision), with automatic day/night camera switching via `"device": "auto"` and `"night_device": "auto"`. The Pi's on-board `bcm2835-codec`/`bcm2835-isp` video nodes are detected and skipped automatically.
 
 ## Quick start
