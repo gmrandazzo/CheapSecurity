@@ -49,6 +49,13 @@ Key Features
 - Optional: a Telegram bot token for Telegram notifications
 - Optional: SMTP credentials for email alerts
 
+## Tested hardware
+
+CheapSecurity is hardware-agnostic and works with any standard V4L2/USB webcam. It has been verified working on:
+
+- **Odroid XU4** — two USB cameras: a **USB color camera** (day) and a **USB IR camera** (night vision)
+- **Raspberry Pi Zero 1 W** — two USB cameras: a **USB color camera** (day) and a **USB IR camera** (night vision), with automatic day/night camera switching via `"device": "auto"` and `"night_device": "auto"`. The Pi's on-board `bcm2835-codec`/`bcm2835-isp` video nodes are detected and skipped automatically.
+
 ## Quick start
 
 1. Verify OpenCV is available:
@@ -123,11 +130,11 @@ Edit `config.json`:
 
 | Section | Key | Description |
 |---------|-----|-------------|
-| `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) |
+| `camera` | `device` | V4L2 device index (`0` = `/dev/video0`) or device path, or `"auto"` to auto-detect (see below) |
 | `camera` | `width`, `height`, `fps` | Capture resolution and frame rate. Set `width` and `height` to `0` or `"auto"` to automatically detect and use the camera's maximum supported hardware resolution. |
 | `camera` | `night_mode` | Enable low-light enhancement / IR camera switching |
 | `camera` | `night_mode_strength` | Software enhancement strength: `low`, `normal`, or `aggressive` |
-| `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`). Set to `null` to use a single camera. |
+| `camera` | `night_device` | Optional second V4L2 device for night vision (e.g. `1` for `/dev/video1`), or `"auto"` to auto-detect. Set to `null` to use a single camera. |
 | `camera` | `night_device_width`, `night_device_height`, `night_device_fps` | Resolution and FPS of the optional night camera (set `width`/`height` to `0` or `"auto"` for max resolution) |
 | `camera` | `night_software_enhance` | Apply CLAHE/gamma to the IR camera feed (`true`/`false`) |
 | `camera` | `night_mode_fps` | Target FPS in night mode (camera may ignore this) |
@@ -409,6 +416,37 @@ Example configuration:
 
 If the IR camera fails to open, the system falls back to the day camera and logs a warning.
 
+### Automatic camera detection (`"auto"`)
+
+USB camera device numbers (`/dev/videoN`) depend on USB enumeration order and can change between reboots or when cameras are re-plugged. Instead of hardcoding indices you can let CheapSecurity detect the cameras from their actual video content:
+
+```json
+"camera": {
+  "device": "auto",
+  "night_device": "auto"
+}
+```
+
+On startup (and whenever the camera reconnects) the system opens every V4L2 capture device for a moment, captures real frames, and classifies each camera:
+
+- **`mono`** — grayscale frames or exactly zero chroma: a true IR/mono sensor. This works at any brightness, because a mono sensor never produces color information.
+- **`tinted`** — vivid pixels, but all clustered in one or two hue bins: a color sensor with the IR-cut filter removed (the typical cheap "night vision" camera), which shows a uniform reddish/bluish cast.
+- **`color`** — vivid pixels spread across hues: a normal color webcam.
+
+Assignment: the **day camera** is a plain `color` camera (preferred by class, then by score — a tinted IR camera can out-score a color one but never takes the day slot). The **night/IR camera** is a `mono` one if present, otherwise a `tinted` one. If neither exists, night mode falls back to software enhancement on the day camera.
+
+Detection is content-based, so it picks the right physical cameras no matter which `/dev/videoN` numbers the kernel assigns. Non-camera nodes (e.g. the `bcm2835-codec`/`bcm2835-isp` devices on a Raspberry Pi, or UVC metadata nodes) are skipped automatically. Watch the service log to see what was detected and picked:
+
+```text
+AUTO camera: skipping /dev/video1 (FHD Camera): not a capture device
+AUTO camera: /dev/video0 (FHD Camera) score 52.4 [color]
+AUTO camera: /dev/video2 (2K HD Camera) score 61.7 [tinted]
+AUTO camera: day camera → /dev/video0
+AUTO camera: night camera → /dev/video2 [tinted]
+```
+
+The settings also accept explicit device paths (e.g. `"/dev/v4l/by-id/..."`) for a stable identifier when you prefer fixed assignments.
+
 ### Scheduling night mode with cron
 
 You can use `cron` on the Odroid (or any Linux host) to switch between day and IR cameras automatically. The dashboard's REST API accepts `X-Requested-With: XMLHttpRequest` as a CSRF-safe header, so a simple `curl` command is enough.
@@ -564,7 +602,7 @@ You need **FFmpeg** and **MediaMTX**.
 
 > **Note:** The commands below use `sudo`. If your board's root access is via `su` instead, run `su` first and execute the commands without `sudo`.
 
-- **FFmpeg** must be installed (`ffmpeg -version`). It is also used for the video-duration fix.
+- **FFmpeg** must be installed (`ffmpeg -version`). It is also an optional fallback for fixing the duration of non-AVI recordings (AVI clips are corrected in place, no ffmpeg needed).
 - **MediaMTX** can be installed in several ways:
 
 #### Option A — download a prebuilt binary (fastest)

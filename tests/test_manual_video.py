@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Test manual Telegram video recording duration.
-Uses a fake camera and an isolated temp config so the real service is untouched.
-"""
 
 import json
 import time
@@ -93,12 +89,6 @@ def _build_config(record_dir: Path) -> dict:
 
 
 def _get_video_duration(path: Path) -> float:
-    """Return video duration in seconds using ffprobe (stream) or OpenCV.
-
-    The AVI container duration reported by ``format=duration`` can be
-    unreliable after the post-recording FPS fix, so we prefer the video
-    stream duration and fall back to frame-count / frame-rate.
-    """
     import fractions
     import shutil
     import subprocess

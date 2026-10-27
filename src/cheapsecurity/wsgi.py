@@ -15,12 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Production WSGI entry point for CheapSecurity.
-
-Starts the CCTV engine once and exposes the Flask application to Gunicorn.
-Use only one Gunicorn worker so the camera is opened by a single process.
-"""
 
 import os
 

@@ -1,5 +1,3 @@
-"""Deep unit tests to reach high test coverage for cctv.py."""
-
 import json
 import time
 from unittest.mock import MagicMock, patch
@@ -88,10 +86,10 @@ def cctv_sys(tmp_path):
         },
         "storage": {
             "max_age_days": 1,
-            "max_size_gb": 0.0001,  # low threshold to test size cleanup
+            "max_size_gb": 0.0001,
             "cleanup_interval_minutes": 1,
             "delete_old_on_startup": True,
-            "emergency_free_space_gb": 1000.0,  # high to force emergency cleanup test
+            "emergency_free_space_gb": 1000.0,
             "emergency_delete_count": 2,
         },
         "web": {"host": "127.0.0.1", "port": 5000, "stream_scale": 0.5},
@@ -123,16 +121,15 @@ def test_storage_cleanup_and_emergency_deletion(cctv_sys, tmp_path):
     f2.write_bytes(b"Y" * 1024 * 1024)
     f3.write_bytes(b"Z" * 1024 * 1024)
 
-    # Artificially set old mtime on f1 & f2
     old_time = time.time() - 86400 * 5
     import os
+
     os.utime(f1, (old_time, old_time))
     os.utime(f2, (old_time + 10, old_time + 10))
 
     cctv_sys._ensure_disk_space()
     cctv_sys._cleanup_storage()
 
-    # Old files should be deleted
     assert not f1.exists()
 
 
@@ -160,14 +157,12 @@ def test_telegram_all_commands_handling(cctv_sys):
         mock_resp.json.return_value = {"ok": True, "result": {"message_id": 555}}
         mock_post.return_value = mock_resp
 
-        # Test authorization check
         unauth_update = {
             "update_id": 1,
             "message": {"text": "/snapshot", "chat": {"id": 99999}},
         }
         cctv_sys._handle_telegram_update(unauth_update)
 
-        # Test command parsing
         commands = [
             "/sent",
             "/delete 101",
@@ -222,7 +217,6 @@ def test_gdrive_upload_success_and_error_handling(mock_post, mock_put, cctv_sys,
     cctv_sys.gdrive_refresh_token = "ref"
     cctv_sys.encrypt_gdrive = False
 
-    # Token success, resumable session success, upload success
     token_resp = MagicMock()
     token_resp.status_code = 200
     token_resp.json.return_value = {"access_token": "ACCESS_123"}
@@ -241,7 +235,6 @@ def test_gdrive_upload_success_and_error_handling(mock_post, mock_put, cctv_sys,
     assert res is True
     assert mock_put.called
 
-    # Token error response
     err_resp = MagicMock()
     err_resp.status_code = 400
     err_resp.text = "invalid grant"
@@ -288,8 +281,50 @@ def test_fix_video_duration_and_manual_recording(cctv_sys, tmp_path):
     assert cctv_sys._manual_recording_active is True
 
     with patch("cheapsecurity.cctv.CCTVSystem._send_telegram_video") as mock_send:
-        cctv_sys._finalize_manual_recording(video, chat_id="12345", actual_duration=5.0, frames_written=75, writer_fps=15.0)
+        cctv_sys._finalize_manual_recording(
+            video,
+            chat_id="12345",
+            actual_duration=5.0,
+            frames_written=75,
+            writer_fps=15.0,
+            device=0,
+        )
         assert mock_send.called
+
+
+def test_motion_recording_finalize_fixes_duration(cctv_sys, tmp_path):
+    video = tmp_path / "motion_test.avi"
+    video.write_bytes(b"VIDEO_DATA")
+
+    cctv_sys.recording_path = video
+    cctv_sys.is_recording = True
+    cctv_sys.recording_started = time.time() - 4.0
+    cctv_sys._frames_written = 30
+    cctv_sys._writer_fps = 15.0
+    cctv_sys._prebuffer_span = 1.0
+
+    def _run_inline(target, args=(), **kwargs):
+        target(*args)
+        return MagicMock()
+
+    with (
+        patch("cheapsecurity.cctv.threading.Thread", side_effect=_run_inline),
+        patch.object(cctv_sys, "_fix_video_duration") as mock_fix,
+        patch.object(cctv_sys, "_maybe_send_telegram") as mock_tg,
+        patch.object(cctv_sys, "_maybe_upload_cloud") as mock_cloud,
+    ):
+        cctv_sys._stop_recording()
+
+    assert cctv_sys.is_recording is False
+    assert mock_fix.called
+    _, duration, frames, fps, device = mock_fix.call_args.args
+
+    assert duration >= 4.0 + 1.0 - 0.5
+    assert frames == 30
+    assert fps == 15.0
+    assert device == 0
+    assert mock_tg.called
+    assert mock_cloud.called
 
 
 @patch("cv2.VideoCapture")
@@ -310,11 +345,10 @@ def test_camera_switching_and_release(mock_vcap, cctv_sys):
 
 
 def test_motion_detection_and_recording_triggers(cctv_sys):
-    # Black frame
+
     f1 = np.zeros((480, 640, 3), dtype=np.uint8)
     assert cctv_sys._detect_motion(f1) is False
 
-    # White frame (huge motion difference)
     f2 = np.full((480, 640, 3), 255, dtype=np.uint8)
     assert cctv_sys._detect_motion(f2) is True
 
@@ -343,7 +377,6 @@ def test_telegram_send_photo_and_video_retry_failures(mock_post, cctv_sys, tmp_p
     mock_resp.status_code = 500
     mock_post.return_value = mock_resp
 
-    # Should retry 3 times and gracefully handle 500 server error
     cctv_sys.encrypt_telegram = False
     cctv_sys._send_telegram_photo(b"DUMMY_PHOTO", chat_id="12345", caption="Snap")
     assert mock_post.call_count >= 3

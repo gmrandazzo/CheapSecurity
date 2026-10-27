@@ -24,3 +24,6 @@ config.json
 *_token
 gmail_smtp_token
 telegram_bot_token
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

@@ -1,17 +1,15 @@
-"""Unit tests for cheapsecurity.web."""
-
 import base64
 import json
 from unittest.mock import MagicMock
 
 import pytest
 
+from cheapsecurity import __version__
 from cheapsecurity.web import app
 
 
 @pytest.fixture
 def client(monkeypatch):
-    """Provide a Flask test client with a mocked CCTV system."""
     fake_cctv = MagicMock()
     fake_cctv.cfg = {
         "camera": {"width": 640, "height": 480, "fps": 15},
@@ -46,6 +44,11 @@ class TestIndex:
         test_client, _ = client
         response = test_client.get("/")
         assert response.status_code == 200
+
+    def test_index_shows_version(self, client):
+        test_client, _ = client
+        response = test_client.get("/")
+        assert f"v{__version__}".encode() in response.data
 
 
 class TestStatus:
